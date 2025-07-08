@@ -22,28 +22,8 @@ typedef __u32 __be32;
 typedef __u64 __be64;
 typedef __u32 __wsum;
 
-#include "bpf_helpers.h"
+#include "src/bpf_helpers.h"
 
 typedef __u16 __sum16;
 
 #define ETH_P_IP 0x0800
-
-struct ethhdr {
-	unsigned char h_dest[6];
-	unsigned char h_source[6];
-	__be16 h_proto;
-};
-
-struct iphdr {
-	__u8 ihl: 4;
-	__u8 version: 4;
-	__u8 tos;
-	__be16 tot_len;
-	__be16 id;
-	__be16 frag_off;
-	__u8 ttl;
-	__u8 protocol;
-	__sum16 check;
-	__be32 saddr;
-	__be32 daddr;
-};

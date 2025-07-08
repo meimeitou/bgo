@@ -1,7 +1,7 @@
 //go:build ignore
 
 #include "common.h"
-#include "bpf_tracing.h"
+#include "src/bpf_tracing.h"
 #include <linux/ptrace.h>
 #include <linux/bpf.h>
 

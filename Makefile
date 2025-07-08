@@ -108,12 +108,6 @@ uninstall:
 	@echo "Uninstalling $(BINARY_NAME)..."
 	sudo rm -f /usr/local/bin/$(BINARY_NAME)
 
-# 运行程序
-.PHONY: run
-run: build
-	@echo "Running $(BINARY_NAME)..."
-	sudo $(BUILD_DIR)/$(BINARY_NAME)
-
 # 清理
 .PHONY: clean
 clean:
@@ -162,7 +156,6 @@ help:
 	@echo "  cross-compile    - Cross compile for multiple architectures"
 	@echo "  install          - Install to /usr/local/bin"
 	@echo "  uninstall        - Remove from /usr/local/bin"
-	@echo "  run              - Build and run the program"
 	@echo "  clean            - Clean build artifacts"
 	@echo "  clean-all        - Deep clean including generated files"
 	@echo "  check-deps       - Check system dependencies"
