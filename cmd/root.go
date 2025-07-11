@@ -16,6 +16,7 @@ func init() {
 	RootCmd.AddCommand(
 		MakeVersion(),
 		MakeBashReadline(),
-		MakeTCFirewall(),
+		MakeFirewallServer(),
+		MakeFirewallUpdate(),
 	)
 }

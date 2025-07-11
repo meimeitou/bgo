@@ -137,6 +137,14 @@ check-deps:
 		echo "WARNING: clang not found. Install with: sudo apt-get install clang"; \
 	fi
 
+# 测试防火墙功能
+.PHONY: test-firewall
+test-firewall: build
+	@echo "Running firewall functionality tests..."
+	@if [ ! -f ./quick_test.sh ]; then echo "Error: quick_test.sh not found"; exit 1; fi
+	@chmod +x ./quick_test.sh
+	@./quick_test.sh
+
 # 显示帮助信息
 .PHONY: help
 help:
@@ -159,6 +167,7 @@ help:
 	@echo "  clean            - Clean build artifacts"
 	@echo "  clean-all        - Deep clean including generated files"
 	@echo "  check-deps       - Check system dependencies"
+	@echo "  test-firewall    - Test firewall functionality (requires root)"
 	@echo "  help             - Show this help message"
 	@echo ""
 	@echo "Example usage:"

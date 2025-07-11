@@ -22,7 +22,7 @@ typedef __u32 __be32;
 typedef __u64 __be64;
 typedef __u32 __wsum;
 
-#include "src/bpf_helpers.h"
+#include "../libbpf/src/bpf_helpers.h"
 
 typedef __u16 __sum16;
 
