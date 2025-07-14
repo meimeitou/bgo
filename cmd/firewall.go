@@ -91,7 +91,7 @@ Both XDP and TC filtering modes are available simultaneously.`,
 
 	command.Flags().StringVarP(&interfaceName, "interface", "i", "eth0", "Network interface to attach firewall")
 	command.Flags().StringVar(&listenAddr, "listen", ":8080", "HTTP server listen address")
-	command.Flags().StringVar(&pinPath, "pin-path", "/sys/fs/bpf", "BPF filesystem pin path")
+	command.Flags().StringVar(&pinPath, "pin-path", "/sys/fs/bpf/firewall", "BPF filesystem pin path")
 
 	return command
 }
@@ -99,16 +99,17 @@ Both XDP and TC filtering modes are available simultaneously.`,
 // MakeFirewallUpdate creates the firewall-update command
 func MakeFirewallUpdate() *cobra.Command {
 	var (
-		pinPath     string
-		ruleType    string
-		action      string
-		ipRange     string
-		port        uint16
-		protocolStr string
-		ruleIndex   uint32
-		xdp         bool
-		ingress     bool
-		egress      bool
+		pinPath       string
+		ruleType      string
+		action        string
+		ipRange       string
+		port          uint16
+		protocolStr   string
+		ruleIndex     uint32
+		xdp           bool
+		ingress       bool
+		egress        bool
+		interfaceName string
 	)
 
 	command := &cobra.Command{
@@ -118,8 +119,9 @@ func MakeFirewallUpdate() *cobra.Command {
 This command allows adding, removing, and listing firewall rules
 without requiring the firewall daemon to be running.
 
-Use --xdp to manage XDP rules (whitelist/blacklist).
-Use --ingress or --egress to manage TC rules (also supports whitelist/blacklist with --type).`,
+Both XDP and TC modes support whitelist/blacklist rule types:
+- Use --xdp to manage XDP rules (whitelist/blacklist)
+- Use --ingress or --egress to manage TC rules (also supports whitelist/blacklist with --type)`,
 		Example: `  # XDP Rules (whitelist/blacklist)
   # Add whitelist rule for SSH from local network
   bgo firewall-update --xdp --type whitelist --action add --ip 192.168.1.0/24 --port 22 --protocol tcp
@@ -127,8 +129,14 @@ Use --ingress or --egress to manage TC rules (also supports whitelist/blacklist 
   # Add blacklist rule to block all traffic from specific IP
   bgo firewall-update --xdp --type blacklist --action add --ip 10.0.0.100
 
-  # List all XDP whitelist rules
+  # List all XDP rules (both whitelist and blacklist)
+  bgo firewall-update --xdp --action list
+
+  # List specific XDP whitelist rules only
   bgo firewall-update --xdp --type whitelist --action list
+
+  # List specific XDP blacklist rules only  
+  bgo firewall-update --xdp --type blacklist --action list
 
   # Show XDP statistics
   bgo firewall-update --xdp --action stats
@@ -175,12 +183,15 @@ Use --ingress or --egress to manage TC rules (also supports whitelist/blacklist 
 				direction = "xdp"
 			}
 
-			return runFirewallUpdate(pinPath, ruleType, action, ipRange, port, protocol, ruleIndex, direction)
+			// Check if type was explicitly set by user
+			typeExplicitlySet := cmd.Flags().Changed("type")
+
+			return runFirewallUpdate(pinPath, ruleType, action, ipRange, port, protocol, ruleIndex, direction, typeExplicitlySet, interfaceName)
 		},
 	}
 
-	command.Flags().StringVar(&pinPath, "pin-path", "/sys/fs/bpf", "BPF filesystem pin path")
-	command.Flags().StringVar(&ruleType, "type", "whitelist", "Rule type: whitelist or blacklist (only for --xdp)")
+	command.Flags().StringVar(&pinPath, "pin-path", "/sys/fs/bpf/firewall", "BPF filesystem pin path")
+	command.Flags().StringVar(&ruleType, "type", "whitelist", "Rule type: whitelist or blacklist (for both --xdp and TC modes)")
 	command.Flags().StringVar(&action, "action", "list", "Action: add, remove, list, stats")
 	command.Flags().StringVar(&ipRange, "ip", "", "IP address or CIDR range")
 	command.Flags().Uint16Var(&port, "port", 0, "Port number (0 for any port)")
@@ -189,6 +200,7 @@ Use --ingress or --egress to manage TC rules (also supports whitelist/blacklist 
 	command.Flags().BoolVar(&xdp, "xdp", false, "Manage XDP rules (whitelist/blacklist)")
 	command.Flags().BoolVar(&ingress, "ingress", false, "Manage TC ingress (incoming) traffic rules")
 	command.Flags().BoolVar(&egress, "egress", false, "Manage TC egress (outgoing) traffic rules")
+	command.Flags().StringVarP(&interfaceName, "interface", "i", "eth0", "Network interface for TC program attachment (only used for TC rules)")
 
 	return command
 }
@@ -219,13 +231,20 @@ func runFirewallServer(interfaceName, listenAddr, pinPath string) error {
 	}
 	log.Printf("XDP Firewall attached to interface %s", interfaceName)
 
-	// Create TC firewall manager
-	tcManager = firewall.NewTCFirewallManager(pinPath)
-	log.Printf("TC Firewall manager initialized")
-	log.Println("To attach TC programs to interface manually:")
-	log.Printf("  sudo tc qdisc add dev %s clsact", interfaceName)
-	log.Printf("  sudo tc filter add dev %s ingress bpf obj firewall_tc_bpfel.o sec tc_ingress_filter direct-action", interfaceName)
-	log.Printf("  sudo tc filter add dev %s egress bpf obj firewall_tc_bpfel.o sec tc_egress_filter direct-action", interfaceName)
+	// Create TC firewall manager with interface support
+	tcManager = firewall.NewTCFirewallManagerWithInterface(interfaceName, pinPath)
+
+	// Attach TC programs to the interface
+	if err := tcManager.AttachPrograms(); err != nil {
+		log.Printf("Warning: Failed to attach TC programs to interface %s: %v", interfaceName, err)
+		log.Printf("TC rules will be configured but not enforced until programs are attached")
+		log.Println("To attach TC programs manually:")
+		log.Printf("  sudo tc qdisc add dev %s clsact", interfaceName)
+		log.Printf("  sudo tc filter add dev %s ingress bpf obj firewall_tc_bpfel.o sec tc_ingress_filter direct-action", interfaceName)
+		log.Printf("  sudo tc filter add dev %s egress bpf obj firewall_tc_bpfel.o sec tc_egress_filter direct-action", interfaceName)
+	} else {
+		log.Printf("TC Firewall programs attached to interface %s", interfaceName)
+	}
 
 	// Create server
 	server := &FirewallServer{
@@ -233,6 +252,13 @@ func runFirewallServer(interfaceName, listenAddr, pinPath string) error {
 		tcManager: tcManager,
 		pinPath:   pinPath,
 	}
+
+	// Ensure cleanup happens on any exit
+	defer func() {
+		if err := server.Cleanup(interfaceName); err != nil {
+			log.Printf("Cleanup completed with errors: %v", err)
+		}
+	}()
 
 	// Setup HTTP server
 	mux := http.NewServeMux()
@@ -253,7 +279,7 @@ func runFirewallServer(interfaceName, listenAddr, pinPath string) error {
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		<-sigChan
 
-		log.Println("Shutting down firewall server...")
+		log.Println("Received shutdown signal, shutting down firewall server...")
 		cancel()
 
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -279,19 +305,58 @@ func runFirewallServer(interfaceName, listenAddr, pinPath string) error {
 	// Wait for shutdown
 	<-ctx.Done()
 
-	// Cleanup
-	if fw != nil {
-		if err := fw.Close(); err != nil {
-			log.Printf("Error closing XDP firewall: %v", err)
+	log.Println("Firewall server stopped")
+	return nil
+}
+
+// Cleanup performs graceful cleanup of all BPF programs and resources
+func (s *FirewallServer) Cleanup(interfaceName string) error {
+	var errors []error
+
+	log.Println("Starting firewall cleanup...")
+
+	// Detach and cleanup XDP firewall
+	if s.fw != nil {
+		log.Printf("Detaching XDP program from interface %s...", interfaceName)
+		if err := s.fw.Detach(); err != nil {
+			log.Printf("Error detaching XDP program: %v", err)
+			errors = append(errors, fmt.Errorf("XDP detach error: %v", err))
+		} else {
+			log.Printf("XDP program detached from interface %s", interfaceName)
 		}
-	}
-	if tcManager != nil {
-		if err := tcManager.Close(); err != nil {
-			log.Printf("Error closing TC firewall manager: %v", err)
+
+		if err := s.fw.Close(); err != nil {
+			log.Printf("Error closing XDP firewall: %v", err)
+			errors = append(errors, fmt.Errorf("XDP close error: %v", err))
+		} else {
+			log.Printf("XDP firewall resources cleaned up")
 		}
 	}
 
-	log.Println("Firewall server stopped")
+	// Detach and cleanup TC firewall
+	if s.tcManager != nil {
+		log.Printf("Detaching TC programs from interface %s...", interfaceName)
+		if err := s.tcManager.DetachPrograms(); err != nil {
+			log.Printf("Error detaching TC programs: %v", err)
+			errors = append(errors, fmt.Errorf("TC detach error: %v", err))
+		} else {
+			log.Printf("TC programs detached from interface %s", interfaceName)
+		}
+
+		if err := s.tcManager.Close(); err != nil {
+			log.Printf("Error closing TC firewall manager: %v", err)
+			errors = append(errors, fmt.Errorf("TC close error: %v", err))
+		} else {
+			log.Printf("TC firewall manager resources cleaned up")
+		}
+	}
+
+	log.Println("Firewall cleanup completed")
+
+	if len(errors) > 0 {
+		return fmt.Errorf("cleanup completed with %d errors: %v", len(errors), errors)
+	}
+
 	return nil
 }
 
@@ -708,9 +773,9 @@ func (s *FirewallServer) removeTCRule(w http.ResponseWriter, r *http.Request, di
 }
 
 // runFirewallUpdate handles the firewall-update command
-func runFirewallUpdate(pinPath, ruleType, action, ipRange string, port uint16, protocol uint8, ruleIndex uint32, direction string) error { // Handle TC-based rules (ingress/egress)
+func runFirewallUpdate(pinPath, ruleType, action, ipRange string, port uint16, protocol uint8, ruleIndex uint32, direction string, typeExplicitlySet bool, interfaceName string) error {
 	if direction == "ingress" || direction == "egress" {
-		return runTCFirewallUpdate(pinPath, direction, action, ipRange, port, protocol, ruleIndex)
+		return runTCFirewallUpdate(pinPath, ruleType, direction, action, ipRange, port, protocol, ruleIndex, typeExplicitlySet, interfaceName)
 	}
 
 	// Handle XDP-based rules (whitelist/blacklist)
@@ -775,33 +840,97 @@ func runFirewallUpdate(pinPath, ruleType, action, ipRange string, port uint16, p
 			fmt.Printf("Successfully removed %s rule at index %d\n", ruleType, ruleIndex)
 
 		case "list":
-			var rules []firewall.Rule
-			var err error
+			// Check if type was explicitly specified via command line flag
+			// If user runs with default type, show all rules; if explicitly specified, show only that type
+			showAllRules := ruleType == "whitelist" && !typeExplicitlySet
 
-			if ruleType == "whitelist" {
-				rules, err = fwManager.ListWhitelistRules()
-			} else if ruleType == "blacklist" {
-				rules, err = fwManager.ListBlacklistRules()
+			if showAllRules {
+				// List both whitelist and blacklist rules
+				whitelistRules, err := fwManager.ListWhitelistRules()
+				if err != nil {
+					return fmt.Errorf("failed to list whitelist rules: %v", err)
+				}
+
+				blacklistRules, err := fwManager.ListBlacklistRules()
+				if err != nil {
+					return fmt.Errorf("failed to list blacklist rules: %v", err)
+				}
+
+				// Print whitelist rules
+				if len(whitelistRules) > 0 {
+					fmt.Printf("Whitelist Rules:\n")
+					fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "Index", "IP Start", "IP End", "Port", "Protocol", "Action")
+					fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "-----", "--------", "------", "----", "--------", "------")
+
+					for i, rule := range whitelistRules {
+						fmt.Printf("%-5d %-15s %-15s %-6d %-8s %-6d\n",
+							i,
+							rule.IPStart.String(),
+							rule.IPEnd.String(),
+							rule.Port,
+							protocolNumberToString(rule.Protocol),
+							rule.Action)
+					}
+					fmt.Println()
+				} else {
+					fmt.Printf("Whitelist Rules:\n")
+					fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "Index", "IP Start", "IP End", "Port", "Protocol", "Action")
+					fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "-----", "--------", "------", "----", "--------", "------")
+					fmt.Println("No whitelist rules found")
+					fmt.Println()
+				}
+
+				// Print blacklist rules
+				if len(blacklistRules) > 0 {
+					fmt.Printf("Blacklist Rules:\n")
+					fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "Index", "IP Start", "IP End", "Port", "Protocol", "Action")
+					fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "-----", "--------", "------", "----", "--------", "------")
+
+					for i, rule := range blacklistRules {
+						fmt.Printf("%-5d %-15s %-15s %-6d %-8s %-6d\n",
+							i,
+							rule.IPStart.String(),
+							rule.IPEnd.String(),
+							rule.Port,
+							protocolNumberToString(rule.Protocol),
+							rule.Action)
+					}
+				} else {
+					fmt.Printf("Blacklist Rules:\n")
+					fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "Index", "IP Start", "IP End", "Port", "Protocol", "Action")
+					fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "-----", "--------", "------", "----", "--------", "------")
+					fmt.Println("No blacklist rules found")
+				}
 			} else {
-				return fmt.Errorf("invalid rule type: %s (must be whitelist or blacklist)", ruleType)
-			}
+				// Show specific rule type as requested
+				var rules []firewall.Rule
+				var err error
 
-			if err != nil {
-				return fmt.Errorf("failed to list rules: %v", err)
-			}
+				if ruleType == "whitelist" {
+					rules, err = fwManager.ListWhitelistRules()
+				} else if ruleType == "blacklist" {
+					rules, err = fwManager.ListBlacklistRules()
+				} else {
+					return fmt.Errorf("invalid rule type: %s (must be whitelist or blacklist)", ruleType)
+				}
 
-			fmt.Printf("%s Rules:\n", ruleType)
-			fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "Index", "IP Start", "IP End", "Port", "Protocol", "Action")
-			fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "-----", "--------", "------", "----", "--------", "------")
+				if err != nil {
+					return fmt.Errorf("failed to list rules: %v", err)
+				}
 
-			for i, rule := range rules {
-				fmt.Printf("%-5d %-15s %-15s %-6d %-8s %-6d\n",
-					i,
-					rule.IPStart.String(),
-					rule.IPEnd.String(),
-					rule.Port,
-					protocolNumberToString(rule.Protocol),
-					rule.Action)
+				fmt.Printf("%s Rules:\n", ruleType)
+				fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "Index", "IP Start", "IP End", "Port", "Protocol", "Action")
+				fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "-----", "--------", "------", "----", "--------", "------")
+
+				for i, rule := range rules {
+					fmt.Printf("%-5d %-15s %-15s %-6d %-8s %-6d\n",
+						i,
+						rule.IPStart.String(),
+						rule.IPEnd.String(),
+						rule.Port,
+						protocolNumberToString(rule.Protocol),
+						rule.Action)
+				}
 			}
 
 		case "stats":
@@ -830,11 +959,20 @@ func runFirewallUpdate(pinPath, ruleType, action, ipRange string, port uint16, p
 }
 
 // runTCFirewallUpdate handles TC-based firewall rules with whitelist/blacklist support
-func runTCFirewallUpdate(pinPath, direction, action, ipRange string, port uint16, protocol uint8, ruleIndex uint32) error {
+func runTCFirewallUpdate(pinPath, ruleType, direction, action, ipRange string, port uint16, protocol uint8, ruleIndex uint32, typeExplicitlySet bool, interfaceName string) error {
 	fmt.Printf("Managing TC %s rules\n", direction)
 
-	// Create TC manager
-	tcManager := firewall.NewTCFirewallManager(pinPath)
+	// Create TC manager with interface support
+	tcManager := firewall.NewTCFirewallManagerWithInterface(interfaceName, pinPath)
+
+	// Check if TC programs are attached
+	attached, err := tcManager.IsAttached()
+	if err != nil {
+		fmt.Printf("Warning: Cannot check TC attachment status: %v\n", err)
+	} else if !attached {
+		fmt.Printf("Warning: TC firewall programs are not attached to interface %s\n", interfaceName)
+		return fmt.Errorf("TC programs are not attached to interface %s", interfaceName)
+	}
 
 	switch action {
 	case "add":
@@ -864,15 +1002,6 @@ func runTCFirewallUpdate(pinPath, direction, action, ipRange string, port uint16
 			IPEnd:    endIPUint32,
 			Port:     port,
 			Protocol: protocol,
-			RuleType: firewall.TCRuleTypeBlacklist, // Default to blacklist
-			Action:   firewall.TCActionDeny,        // Default action for TC rules
-			Direction: func() uint8 {
-				if direction == "ingress" {
-					return firewall.TCDirectionIngress
-				} else {
-					return firewall.TCDirectionEgress
-				}
-			}(),
 		}
 
 		var directionFlag uint8
@@ -882,12 +1011,24 @@ func runTCFirewallUpdate(pinPath, direction, action, ipRange string, port uint16
 			directionFlag = firewall.TCDirectionEgress
 		}
 
-		// Add as blacklist rule (default behavior)
-		if err := tcManager.AddBlacklistRule(rule, directionFlag); err != nil {
-			return fmt.Errorf("failed to add TC blacklist rule: %v", err)
+		// Add rule based on type
+		if ruleType == "whitelist" {
+			rule.RuleType = firewall.TCRuleTypeWhitelist
+			rule.Action = firewall.TCActionAllow
+			if err := tcManager.AddWhitelistRule(rule, directionFlag); err != nil {
+				return fmt.Errorf("failed to add TC whitelist rule: %v", err)
+			}
+			fmt.Printf("Successfully added %s whitelist rule for %s", direction, ipRange)
+		} else if ruleType == "blacklist" {
+			rule.RuleType = firewall.TCRuleTypeBlacklist
+			rule.Action = firewall.TCActionDeny
+			if err := tcManager.AddBlacklistRule(rule, directionFlag); err != nil {
+				return fmt.Errorf("failed to add TC blacklist rule: %v", err)
+			}
+			fmt.Printf("Successfully added %s blacklist rule for %s", direction, ipRange)
+		} else {
+			return fmt.Errorf("invalid rule type: %s (must be whitelist or blacklist)", ruleType)
 		}
-
-		fmt.Printf("Successfully added %s blacklist rule for %s", direction, ipRange)
 		if port > 0 {
 			fmt.Printf(":%d", port)
 		}
@@ -913,12 +1054,20 @@ func runTCFirewallUpdate(pinPath, direction, action, ipRange string, port uint16
 			directionFlag = firewall.TCDirectionEgress
 		}
 
-		// Try removing from blacklist first (default behavior)
-		if err := tcManager.RemoveBlacklistRule(ruleIndex, directionFlag); err != nil {
-			return fmt.Errorf("failed to remove TC blacklist rule: %v", err)
+		// Remove rule based on type
+		if ruleType == "whitelist" {
+			if err := tcManager.RemoveWhitelistRule(ruleIndex, directionFlag); err != nil {
+				return fmt.Errorf("failed to remove TC whitelist rule: %v", err)
+			}
+			fmt.Printf("Successfully removed %s whitelist rule at index %d\n", direction, ruleIndex)
+		} else if ruleType == "blacklist" {
+			if err := tcManager.RemoveBlacklistRule(ruleIndex, directionFlag); err != nil {
+				return fmt.Errorf("failed to remove TC blacklist rule: %v", err)
+			}
+			fmt.Printf("Successfully removed %s blacklist rule at index %d\n", direction, ruleIndex)
+		} else {
+			return fmt.Errorf("invalid rule type: %s (must be whitelist or blacklist)", ruleType)
 		}
-
-		fmt.Printf("Successfully removed %s blacklist rule at index %d\n", direction, ruleIndex)
 
 	case "list":
 		var directionFlag uint8
@@ -928,26 +1077,107 @@ func runTCFirewallUpdate(pinPath, direction, action, ipRange string, port uint16
 			directionFlag = firewall.TCDirectionEgress
 		}
 
-		// List blacklist rules
-		blacklistRules, err := tcManager.ListBlacklistRules(directionFlag)
-		if err != nil {
-			return fmt.Errorf("failed to list TC blacklist rules: %v", err)
-		}
+		// Check if type was explicitly specified via command line flag
+		// If user runs with default type, show all rules; if explicitly specified, show only that type
+		showAllRules := ruleType == "whitelist" && !typeExplicitlySet
 
-		// List whitelist rules
-		whitelistRules, err := tcManager.ListWhitelistRules(directionFlag)
-		if err != nil {
-			return fmt.Errorf("failed to list TC whitelist rules: %v", err)
-		}
+		if showAllRules {
+			// List both whitelist and blacklist rules
+			whitelistRules, err := tcManager.ListWhitelistRules(directionFlag)
+			if err != nil {
+				return fmt.Errorf("failed to list TC whitelist rules: %v", err)
+			}
 
-		fmt.Printf("TC %s Rules:\n", direction)
+			blacklistRules, err := tcManager.ListBlacklistRules(directionFlag)
+			if err != nil {
+				return fmt.Errorf("failed to list TC blacklist rules: %v", err)
+			}
 
-		if len(whitelistRules) > 0 {
-			fmt.Printf("\nWhitelist Rules:\n")
+			fmt.Printf("TC %s Rules:\n", direction)
+
+			// Print whitelist rules
+			if len(whitelistRules) > 0 {
+				fmt.Printf("\nWhitelist Rules:\n")
+				fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "Index", "IP Start", "IP End", "Port", "Protocol", "Action")
+				fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "-----", "--------", "------", "----", "--------", "------")
+
+				for i, rule := range whitelistRules {
+					startIP := make(net.IP, 4)
+					endIP := make(net.IP, 4)
+					binary.BigEndian.PutUint32(startIP, rule.IPStart)
+					binary.BigEndian.PutUint32(endIP, rule.IPEnd)
+
+					protocolName := protocolNumberToString(rule.Protocol)
+					actionName := map[uint8]string{0: "ALLOW", 1: "DENY"}[rule.Action]
+
+					fmt.Printf("%-5d %-15s %-15s %-6d %-8s %-6s\n",
+						i,
+						startIP.String(),
+						endIP.String(),
+						rule.Port,
+						protocolName,
+						actionName)
+				}
+				fmt.Println()
+			} else {
+				fmt.Printf("\nWhitelist Rules:\n")
+				fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "Index", "IP Start", "IP End", "Port", "Protocol", "Action")
+				fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "-----", "--------", "------", "----", "--------", "------")
+				fmt.Println("No whitelist rules found")
+				fmt.Println()
+			}
+
+			// Print blacklist rules
+			if len(blacklistRules) > 0 {
+				fmt.Printf("Blacklist Rules:\n")
+				fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "Index", "IP Start", "IP End", "Port", "Protocol", "Action")
+				fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "-----", "--------", "------", "----", "--------", "------")
+
+				for i, rule := range blacklistRules {
+					startIP := make(net.IP, 4)
+					endIP := make(net.IP, 4)
+					binary.BigEndian.PutUint32(startIP, rule.IPStart)
+					binary.BigEndian.PutUint32(endIP, rule.IPEnd)
+
+					protocolName := protocolNumberToString(rule.Protocol)
+					actionName := map[uint8]string{0: "ALLOW", 1: "DENY"}[rule.Action]
+
+					fmt.Printf("%-5d %-15s %-15s %-6d %-8s %-6s\n",
+						i,
+						startIP.String(),
+						endIP.String(),
+						rule.Port,
+						protocolName,
+						actionName)
+				}
+			} else {
+				fmt.Printf("Blacklist Rules:\n")
+				fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "Index", "IP Start", "IP End", "Port", "Protocol", "Action")
+				fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "-----", "--------", "------", "----", "--------", "------")
+				fmt.Println("No blacklist rules found")
+			}
+		} else {
+			// Show specific rule type as requested
+			var rules []firewall.TCRule
+			var err error
+
+			if ruleType == "whitelist" {
+				rules, err = tcManager.ListWhitelistRules(directionFlag)
+			} else if ruleType == "blacklist" {
+				rules, err = tcManager.ListBlacklistRules(directionFlag)
+			} else {
+				return fmt.Errorf("invalid rule type: %s (must be whitelist or blacklist)", ruleType)
+			}
+
+			if err != nil {
+				return fmt.Errorf("failed to list TC %s rules: %v", ruleType, err)
+			}
+
+			fmt.Printf("TC %s %s Rules:\n", direction, ruleType)
 			fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "Index", "IP Start", "IP End", "Port", "Protocol", "Action")
 			fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "-----", "--------", "------", "----", "--------", "------")
 
-			for i, rule := range whitelistRules {
+			for i, rule := range rules {
 				startIP := make(net.IP, 4)
 				endIP := make(net.IP, 4)
 				binary.BigEndian.PutUint32(startIP, rule.IPStart)
@@ -964,34 +1194,10 @@ func runTCFirewallUpdate(pinPath, direction, action, ipRange string, port uint16
 					protocolName,
 					actionName)
 			}
-		}
 
-		if len(blacklistRules) > 0 {
-			fmt.Printf("\nBlacklist Rules:\n")
-			fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "Index", "IP Start", "IP End", "Port", "Protocol", "Action")
-			fmt.Printf("%-5s %-15s %-15s %-6s %-8s %-6s\n", "-----", "--------", "------", "----", "--------", "------")
-
-			for i, rule := range blacklistRules {
-				startIP := make(net.IP, 4)
-				endIP := make(net.IP, 4)
-				binary.BigEndian.PutUint32(startIP, rule.IPStart)
-				binary.BigEndian.PutUint32(endIP, rule.IPEnd)
-
-				protocolName := protocolNumberToString(rule.Protocol)
-				actionName := map[uint8]string{0: "ALLOW", 1: "DENY"}[rule.Action]
-
-				fmt.Printf("%-5d %-15s %-15s %-6d %-8s %-6s\n",
-					i,
-					startIP.String(),
-					endIP.String(),
-					rule.Port,
-					protocolName,
-					actionName)
+			if len(rules) == 0 {
+				fmt.Printf("No %s rules found\n", ruleType)
 			}
-		}
-
-		if len(whitelistRules) == 0 && len(blacklistRules) == 0 {
-			fmt.Printf("No %s rules found\n", direction)
 		}
 
 	case "stats":

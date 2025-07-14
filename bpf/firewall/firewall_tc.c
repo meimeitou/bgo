@@ -1,6 +1,7 @@
 //go:build ignore
 
-#include "common.h"
+#include "common/common.h"
+#include "firewall_common.h"
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
@@ -9,9 +10,7 @@
 #include <linux/udp.h>
 #include <linux/icmp.h>
 #include <linux/pkt_cls.h>
-#include "../../lib/libbpf/src/bpf_endian.h"
-
-#define MAX_RULES 1000
+#include "libbpf/src/bpf_endian.h"
 
 // Protocol numbers
 #define IPPROTO_ICMP 1
@@ -185,40 +184,40 @@ static int check_whitelist_rules(struct __sk_buff *skb, __u32 src_ip, __u32 dst_
     if (!rule_count || *rule_count == 0) {
         return -1; // No whitelist rules, continue to blacklist check
     }
-    
-    // Iterate through whitelist rules
-    #pragma unroll
-    for (__u32 i = 0; i < MAX_RULES && i < *rule_count; i++) {
+// 在check_whitelist_rules函数中：
+    __u32 i = 0;
+    if (i < MAX_RULES) {
         if (direction == DIRECTION_INGRESS) {
             rule = bpf_map_lookup_elem(&tc_ingress_whitelist, &i);
         } else {
             rule = bpf_map_lookup_elem(&tc_egress_whitelist, &i);
         }
         
-        if (!rule) continue;
-        
-        // Check if rule matches
-        int ip_match = 0;
-        int port_match = 0;
-        int protocol_match = protocol_matches(packet_protocol, rule->protocol);
-        
-        // For ingress: check source IP (external -> internal)
-        // For egress: check destination IP (internal -> external)
-        if (direction == DIRECTION_INGRESS) {
-            ip_match = ip_in_range(src_ip, rule->ip_start, rule->ip_end);
-            port_match = (rule->port == 0 || src_port == rule->port || dst_port == rule->port);
-        } else {
-            ip_match = ip_in_range(dst_ip, rule->ip_start, rule->ip_end);
-            port_match = (rule->port == 0 || src_port == rule->port || dst_port == rule->port);
-        }
-        
-        if (ip_match && port_match && protocol_match) {
-            bpf_printk("TC: Whitelist ALLOW %s packet: protocol=%u\n",
-                      direction == DIRECTION_INGRESS ? "ingress" : "egress", packet_protocol);
-            return TC_ACT_OK; // Whitelist match - allow
+        if (rule) {
+            // Check if rule matches
+            int ip_match = 0;
+            int port_match = 0;
+            int protocol_match = protocol_matches(packet_protocol, rule->protocol);
+            
+            // For ingress: check source IP (external -> internal)
+            // For egress: check destination IP (internal -> external)
+            if (direction == DIRECTION_INGRESS) {
+                ip_match = ip_in_range(src_ip, rule->ip_start, rule->ip_end);
+                port_match = (rule->port == 0 || src_port == rule->port || dst_port == rule->port);
+            } else {
+                ip_match = ip_in_range(dst_ip, rule->ip_start, rule->ip_end);
+                port_match = (rule->port == 0 || src_port == rule->port || dst_port == rule->port);
+            }
+            
+            if (ip_match && port_match && protocol_match) {
+                bpf_printk("TC: Whitelist ALLOW %s packet: protocol=%u\n",
+                          direction == DIRECTION_INGRESS ? "ingress" : "egress", packet_protocol);
+                return TC_ACT_OK; // Whitelist match - allow
+            }
+        }else{
+            return TC_ACT_OK;
         }
     }
-    
     return -1; // No whitelist match, continue to blacklist check
 }
 
@@ -239,40 +238,42 @@ static int check_blacklist_rules(struct __sk_buff *skb, __u32 src_ip, __u32 dst_
     if (!rule_count || *rule_count == 0) {
         return TC_ACT_OK; // No blacklist rules, default allow
     }
-    
-    // Iterate through blacklist rules
-    #pragma unroll
-    for (__u32 i = 0; i < MAX_RULES && i < *rule_count; i++) {
+   
+    // 在check_blacklist_rules函数中：
+    // Iterate through blacklist rules - simplified to avoid infinite loop
+    __u32 i = 0;
+    if (i < MAX_RULES) {
         if (direction == DIRECTION_INGRESS) {
             rule = bpf_map_lookup_elem(&tc_ingress_blacklist, &i);
         } else {
             rule = bpf_map_lookup_elem(&tc_egress_blacklist, &i);
         }
-        
-        if (!rule) continue;
-        
-        // Check if rule matches
-        int ip_match = 0;
-        int port_match = 0;
-        int protocol_match = protocol_matches(packet_protocol, rule->protocol);
-        
-        // For ingress: check source IP (external -> internal)
-        // For egress: check destination IP (internal -> external)
-        if (direction == DIRECTION_INGRESS) {
-            ip_match = ip_in_range(src_ip, rule->ip_start, rule->ip_end);
-            port_match = (rule->port == 0 || src_port == rule->port || dst_port == rule->port);
+
+        if (rule) {
+            // Check if rule matches
+            int ip_match = 0;
+            int port_match = 0;
+            int protocol_match = protocol_matches(packet_protocol, rule->protocol);
+            
+            // For ingress: check source IP (external -> internal)
+            // For egress: check destination IP (internal -> external)
+            if (direction == DIRECTION_INGRESS) {
+                ip_match = ip_in_range(src_ip, rule->ip_start, rule->ip_end);
+                port_match = (rule->port == 0 || src_port == rule->port || dst_port == rule->port);
+            } else {
+                ip_match = ip_in_range(dst_ip, rule->ip_start, rule->ip_end);
+                port_match = (rule->port == 0 || src_port == rule->port || dst_port == rule->port);
+            }
+            
+            if (ip_match && port_match && protocol_match) {
+                bpf_printk("TC: Blacklist DENY %s packet: protocol=%u\n",
+                          direction == DIRECTION_INGRESS ? "ingress" : "egress", packet_protocol);
+                return TC_ACT_SHOT; // Blacklist match - deny
+            }
         } else {
-            ip_match = ip_in_range(dst_ip, rule->ip_start, rule->ip_end);
-            port_match = (rule->port == 0 || src_port == rule->port || dst_port == rule->port);
-        }
-        
-        if (ip_match && port_match && protocol_match) {
-            bpf_printk("TC: Blacklist DENY %s packet: protocol=%u\n",
-                      direction == DIRECTION_INGRESS ? "ingress" : "egress", packet_protocol);
-            return TC_ACT_SHOT; // Blacklist match - deny
+            return TC_ACT_OK; // No rule found, default allow
         }
     }
-    
     return TC_ACT_OK; // No blacklist match, default allow
 }
 

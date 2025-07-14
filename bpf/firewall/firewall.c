@@ -1,6 +1,7 @@
 //go:build ignore
 
-#include "common.h"
+#include "common/common.h"
+#include "firewall_common.h"
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
@@ -52,7 +53,7 @@ struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __type(key, __u32);
     __type(value, struct fw_rule);
-    __uint(max_entries, 1000);
+    __uint(max_entries, MAX_RULES);
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } whitelist_map SEC(".maps");
 
@@ -61,7 +62,7 @@ struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __type(key, __u32);
     __type(value, struct fw_rule);
-    __uint(max_entries, 1000);
+    __uint(max_entries, MAX_RULES);
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } blacklist_map SEC(".maps");
 
@@ -160,7 +161,7 @@ static __always_inline int check_whitelist(__u32 ip, __u16 port, __u8 protocol)
 
     // 使用#pragma unroll优化循环 - 检查前50个规则
     #pragma unroll
-    for (int i = 0; i < 50; i++) {
+    for (int i = 0; i < MAX_RULES; i++) {
         key = i;
         rule = bpf_map_lookup_elem(&whitelist_map, &key);
         if (rule && rule->ip_start != 0 && check_rule_match(rule, ip, port, protocol))
@@ -177,7 +178,7 @@ static __always_inline int check_blacklist(__u32 ip, __u16 port, __u8 protocol)
 
     // 使用#pragma unroll优化循环 - 检查前50个规则
     #pragma unroll
-    for (int i = 0; i < 50; i++) {
+    for (int i = 0; i < MAX_RULES; i++) {
         key = i;
         rule = bpf_map_lookup_elem(&blacklist_map, &key);
         if (rule && rule->ip_start != 0 && check_rule_match(rule, ip, port, protocol))

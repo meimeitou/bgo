@@ -8,19 +8,21 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/vishvananda/netlink"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type fw_rule -type fw_stats firewall firewall.c -- -I../../lib/common
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type tc_rule -type firewall_tc_stats firewall_tc firewall_tc.c -- -I../../lib/common
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type fw_rule -type fw_stats firewall firewall.c -- -I../../lib
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type tc_rule -type firewall_tc_stats firewall_tc firewall_tc.c -- -I../../lib
 
 const (
 	// MaxRules defines the maximum number of rules we can handle (using #pragma unroll)
-	MaxRules = 50
-	PinPath  = "/sys/fs/bpf"
+	MaxRules = 10
+	PinPath  = "/sys/fs/bpf/firewall"
 )
 
 // Protocol constants matching BPF code
@@ -139,6 +141,11 @@ func NewXDPFirewallWithPin(iface, pinPath string) (*XDPFirewall, error) {
 func (fw *XDPFirewall) loadNew() error {
 	var opts *ebpf.CollectionOptions
 	if fw.pinPath != "" {
+		// Create pin directory if it doesn't exist
+		if err := os.MkdirAll(fw.pinPath, 0755); err != nil {
+			return fmt.Errorf("failed to create pin directory %s: %w", fw.pinPath, err)
+		}
+
 		opts = &ebpf.CollectionOptions{
 			Maps: ebpf.MapOptions{
 				PinPath: fw.pinPath,
@@ -511,20 +518,41 @@ func (fm *FirewallManager) RemoveBlacklistRule(index uint32) error {
 }
 
 // removeRuleFromMap removes a rule from the specified pinned map
-func (fm *FirewallManager) removeRuleFromMap(mapPath string, index uint32) error {
+func (fm *FirewallManager) removeRuleFromMap(mapPath string, userIndex uint32) error {
 	m, err := ebpf.LoadPinnedMap(mapPath, nil)
 	if err != nil {
 		return fmt.Errorf("failed to load pinned map %s: %w", mapPath, err)
 	}
 	defer m.Close()
 
-	if index >= MaxRules {
-		return fmt.Errorf("index %d out of range (max %d)", index, MaxRules-1)
+	// Find the actual BPF map index corresponding to the user-visible index
+	var validRuleCount uint32 = 0
+	var actualIndex uint32
+	var found bool
+
+	for i := uint32(0); i < MaxRules; i++ {
+		var bpfRule firewallFwRule
+		if err := m.Lookup(i, &bpfRule); err != nil {
+			continue
+		}
+
+		if bpfRule.IpStart != 0 {
+			if validRuleCount == userIndex {
+				actualIndex = i
+				found = true
+				break
+			}
+			validRuleCount++
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("rule at index %d not found", userIndex)
 	}
 
 	// Clear the rule by setting it to zero values
 	emptyRule := firewallFwRule{}
-	return m.Put(index, emptyRule)
+	return m.Put(actualIndex, emptyRule)
 }
 
 // ListWhitelistRules lists all whitelist rules
@@ -701,14 +729,31 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 // TCFirewallManager manages TC-based firewall rules
 type TCFirewallManager struct {
-	pinPath string
-	objects *firewall_tcObjects
+	pinPath     string
+	objects     *firewall_tcObjects
+	iface       string
+	ingressLink link.Link
+	egressLink  link.Link
 }
 
 // NewTCFirewallManager creates a new TC firewall manager
 func NewTCFirewallManager(pinPath string) *TCFirewallManager {
+	if pinPath == "" {
+		pinPath = PinPath
+	}
 	return &TCFirewallManager{
 		pinPath: pinPath,
+	}
+}
+
+// NewTCFirewallManagerWithInterface creates a new TC firewall manager with interface
+func NewTCFirewallManagerWithInterface(iface, pinPath string) *TCFirewallManager {
+	if pinPath == "" {
+		pinPath = PinPath
+	}
+	return &TCFirewallManager{
+		pinPath: pinPath,
+		iface:   iface,
 	}
 }
 
@@ -719,7 +764,17 @@ func (m *TCFirewallManager) LoadPinnedMaps() error {
 		return fmt.Errorf("failed to remove memory limit: %v", err)
 	}
 
-	// Load objects from pinned maps
+	// Try to load from pinned maps first
+	if err := m.loadFromPinned(); err != nil {
+		// If pinned maps don't exist, create new ones and pin them
+		return m.createAndPinMaps()
+	}
+
+	return nil
+}
+
+// loadFromPinned attempts to load existing pinned maps
+func (m *TCFirewallManager) loadFromPinned() error {
 	spec, err := loadFirewall_tc()
 	if err != nil {
 		return fmt.Errorf("failed to load firewall_tc spec: %v", err)
@@ -727,28 +782,9 @@ func (m *TCFirewallManager) LoadPinnedMaps() error {
 
 	// Load with pinned maps
 	opts := ebpf.CollectionOptions{
-		MapReplacements: map[string]*ebpf.Map{},
-	}
-
-	// Try to load pinned maps
-	mapNames := []string{
-		"tc_ingress_whitelist",
-		"tc_ingress_blacklist",
-		"tc_egress_whitelist",
-		"tc_egress_blacklist",
-		"tc_stats_map",
-		"tc_ingress_whitelist_count",
-		"tc_ingress_blacklist_count",
-		"tc_egress_whitelist_count",
-		"tc_egress_blacklist_count",
-	}
-
-	for _, mapName := range mapNames {
-		pinnedMap, err := ebpf.LoadPinnedMap(fmt.Sprintf("%s/%s", m.pinPath, mapName), nil)
-		if err != nil {
-			return fmt.Errorf("failed to load pinned map %s: %v", mapName, err)
-		}
-		opts.MapReplacements[mapName] = pinnedMap
+		Maps: ebpf.MapOptions{
+			PinPath: m.pinPath,
+		},
 	}
 
 	objects := &firewall_tcObjects{}
@@ -760,11 +796,59 @@ func (m *TCFirewallManager) LoadPinnedMaps() error {
 	return nil
 }
 
+// createAndPinMaps creates new maps and pins them
+func (m *TCFirewallManager) createAndPinMaps() error {
+	// Create pin directory if it doesn't exist
+	if err := os.MkdirAll(m.pinPath, 0755); err != nil {
+		return fmt.Errorf("failed to create pin directory %s: %v", m.pinPath, err)
+	}
+
+	spec, err := loadFirewall_tc()
+	if err != nil {
+		return fmt.Errorf("failed to load firewall_tc spec: %v", err)
+	}
+
+	// Create new objects with pinning options
+	opts := &ebpf.CollectionOptions{
+		Maps: ebpf.MapOptions{
+			PinPath: m.pinPath,
+		},
+	}
+
+	objects := &firewall_tcObjects{}
+	if err := spec.LoadAndAssign(objects, opts); err != nil {
+		return fmt.Errorf("failed to load and assign new objects: %v", err)
+	}
+
+	// Initialize stats map
+	key := uint32(0)
+	stats := firewall_tcFirewallTcStats{}
+	if err := objects.TcStatsMap.Put(&key, &stats); err != nil {
+		return fmt.Errorf("failed to initialize stats: %v", err)
+	}
+
+	// Initialize rule count maps
+	ruleCount := uint32(0)
+	for _, countMap := range []*ebpf.Map{
+		objects.TcIngressWhitelistCount,
+		objects.TcIngressBlacklistCount,
+		objects.TcEgressWhitelistCount,
+		objects.TcEgressBlacklistCount,
+	} {
+		if err := countMap.Put(&key, &ruleCount); err != nil {
+			return fmt.Errorf("failed to initialize rule count: %v", err)
+		}
+	}
+
+	m.objects = objects
+	return nil
+}
+
 // AddWhitelistRule adds a whitelist rule for specified direction
 func (m *TCFirewallManager) AddWhitelistRule(rule TCRule, direction uint8) error {
 	if m.objects == nil {
 		if err := m.LoadPinnedMaps(); err != nil {
-			return err
+			return fmt.Errorf("failed to initialize maps: %v", err)
 		}
 	}
 
@@ -816,7 +900,7 @@ func (m *TCFirewallManager) AddWhitelistRule(rule TCRule, direction uint8) error
 func (m *TCFirewallManager) AddBlacklistRule(rule TCRule, direction uint8) error {
 	if m.objects == nil {
 		if err := m.LoadPinnedMaps(); err != nil {
-			return err
+			return fmt.Errorf("failed to initialize maps: %v", err)
 		}
 	}
 
@@ -881,7 +965,7 @@ func (m *TCFirewallManager) AddEgressRule(rule TCRule) error {
 func (m *TCFirewallManager) RemoveWhitelistRule(index uint32, direction uint8) error {
 	if m.objects == nil {
 		if err := m.LoadPinnedMaps(); err != nil {
-			return err
+			return fmt.Errorf("failed to initialize maps: %v", err)
 		}
 	}
 
@@ -932,7 +1016,7 @@ func (m *TCFirewallManager) RemoveWhitelistRule(index uint32, direction uint8) e
 func (m *TCFirewallManager) RemoveBlacklistRule(index uint32, direction uint8) error {
 	if m.objects == nil {
 		if err := m.LoadPinnedMaps(); err != nil {
-			return err
+			return fmt.Errorf("failed to initialize maps: %v", err)
 		}
 	}
 
@@ -994,7 +1078,7 @@ func (m *TCFirewallManager) RemoveEgressRule(index uint32) error {
 func (m *TCFirewallManager) ListWhitelistRules(direction uint8) ([]TCRule, error) {
 	if m.objects == nil {
 		if err := m.LoadPinnedMaps(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to initialize maps: %v", err)
 		}
 	}
 
@@ -1043,7 +1127,7 @@ func (m *TCFirewallManager) ListWhitelistRules(direction uint8) ([]TCRule, error
 func (m *TCFirewallManager) ListBlacklistRules(direction uint8) ([]TCRule, error) {
 	if m.objects == nil {
 		if err := m.LoadPinnedMaps(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to initialize maps: %v", err)
 		}
 	}
 
@@ -1103,7 +1187,7 @@ func (m *TCFirewallManager) ListEgressRules() ([]TCRule, error) {
 func (m *TCFirewallManager) GetTCStats() (*TCStats, error) {
 	if m.objects == nil {
 		if err := m.LoadPinnedMaps(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to initialize maps: %v", err)
 		}
 	}
 
@@ -1122,10 +1206,247 @@ func (m *TCFirewallManager) GetTCStats() (*TCStats, error) {
 	}, nil
 }
 
-// Close closes the TC firewall manager
+// Close closes the TC firewall manager and detaches programs if attached
 func (m *TCFirewallManager) Close() error {
-	if m.objects != nil {
-		return m.objects.Close()
+	var errors []error
+
+	// Try to detach programs if interface is set
+	if m.iface != "" {
+		// Always try to detach, regardless of current status
+		// This is more robust during cleanup
+		if err := m.DetachPrograms(); err != nil {
+			// Log the error but don't fail the close operation
+			fmt.Printf("Warning: failed to detach TC programs during close: %v\n", err)
+			errors = append(errors, err)
+		}
 	}
+
+	// Close the BPF objects
+	if m.objects != nil {
+		if err := m.objects.Close(); err != nil {
+			fmt.Printf("Warning: failed to close TC BPF objects: %v\n", err)
+			errors = append(errors, err)
+		}
+	}
+
+	// For cleanup operations, we prefer to complete as much as possible
+	// rather than failing early, so we return nil unless all operations failed
+	if len(errors) > 0 {
+		fmt.Printf("TC firewall cleanup completed with %d warnings\n", len(errors))
+	}
+
 	return nil
+}
+
+// AttachPrograms attaches TC programs to the interface for ingress and egress traffic
+func (m *TCFirewallManager) AttachPrograms() error {
+	if m.iface == "" {
+		return fmt.Errorf("interface name not specified")
+	}
+
+	if m.objects == nil {
+		if err := m.LoadPinnedMaps(); err != nil {
+			return fmt.Errorf("failed to initialize maps: %v", err)
+		}
+	}
+
+	// Get the network interface
+	iface, err := netlink.LinkByName(m.iface)
+	if err != nil {
+		return fmt.Errorf("failed to get interface %s: %v", m.iface, err)
+	}
+
+	// Clean up any existing filters first to avoid conflicts
+	fmt.Printf("Cleaning up existing TC filters on interface %s...\n", m.iface)
+	m.DetachPrograms() // Ignore errors during cleanup
+
+	// Create qdisc if it doesn't exist
+	qdiscs, err := netlink.QdiscList(iface)
+	if err != nil {
+		return fmt.Errorf("failed to list qdiscs: %v", err)
+	}
+
+	hasClsact := false
+	for _, qdisc := range qdiscs {
+		if qdisc.Type() == "clsact" {
+			hasClsact = true
+			break
+		}
+	}
+
+	if !hasClsact {
+		qdisc := &netlink.GenericQdisc{
+			QdiscAttrs: netlink.QdiscAttrs{
+				LinkIndex: iface.Attrs().Index,
+				Handle:    netlink.MakeHandle(0xffff, 0),
+				Parent:    netlink.HANDLE_CLSACT,
+			},
+			QdiscType: "clsact",
+		}
+
+		if err := netlink.QdiscAdd(qdisc); err != nil {
+			return fmt.Errorf("failed to add clsact qdisc: %v", err)
+		}
+		fmt.Printf("Added clsact qdisc to interface %s\n", m.iface)
+	}
+
+	// Attach ingress program
+	ingressFilter := &netlink.BpfFilter{
+		FilterAttrs: netlink.FilterAttrs{
+			LinkIndex: iface.Attrs().Index,
+			Parent:    netlink.HANDLE_MIN_INGRESS,
+			Handle:    1,
+			Protocol:  0x0003, // ETH_P_ALL
+		},
+		Fd:           m.objects.TcIngressFilter.FD(),
+		Name:         "tc_ingress_firewall",
+		DirectAction: true,
+	}
+
+	if err := netlink.FilterAdd(ingressFilter); err != nil {
+		return fmt.Errorf("failed to attach TC ingress program: %v", err)
+	}
+	fmt.Printf("Attached TC ingress filter to interface %s\n", m.iface)
+
+	// Attach egress program
+	egressFilter := &netlink.BpfFilter{
+		FilterAttrs: netlink.FilterAttrs{
+			LinkIndex: iface.Attrs().Index,
+			Parent:    netlink.HANDLE_MIN_EGRESS,
+			Handle:    1,
+			Protocol:  0x0003, // ETH_P_ALL
+		},
+		Fd:           m.objects.TcEgressFilter.FD(),
+		Name:         "tc_egress_firewall",
+		DirectAction: true,
+	}
+
+	if err := netlink.FilterAdd(egressFilter); err != nil {
+		// Clean up ingress filter if egress fails
+		fmt.Printf("Failed to attach egress filter, cleaning up ingress filter...\n")
+		netlink.FilterDel(ingressFilter)
+		return fmt.Errorf("failed to attach TC egress program: %v", err)
+	}
+	fmt.Printf("Attached TC egress filter to interface %s\n", m.iface)
+
+	fmt.Printf("TC firewall programs successfully attached to interface %s\n", m.iface)
+	return nil
+}
+
+// DetachPrograms detaches TC programs from the interface
+func (m *TCFirewallManager) DetachPrograms() error {
+	if m.iface == "" {
+		return fmt.Errorf("interface name not specified")
+	}
+
+	// Get the network interface
+	iface, err := netlink.LinkByName(m.iface)
+	if err != nil {
+		return fmt.Errorf("failed to get interface %s: %v", m.iface, err)
+	}
+
+	var errors []error
+
+	// Remove ingress filters
+	if err := m.removeFiltersForDirection(iface, netlink.HANDLE_MIN_INGRESS, "ingress"); err != nil {
+		errors = append(errors, err)
+	}
+
+	// Remove egress filters
+	if err := m.removeFiltersForDirection(iface, netlink.HANDLE_MIN_EGRESS, "egress"); err != nil {
+		errors = append(errors, err)
+	}
+
+	if len(errors) == 0 {
+		fmt.Printf("TC firewall programs detached from interface %s\n", m.iface)
+	} else {
+		fmt.Printf("TC firewall programs partially detached from interface %s with %d errors\n", m.iface, len(errors))
+	}
+
+	// Don't return errors for cleanup operations - just log them
+	return nil
+}
+
+// removeFiltersForDirection removes all BPF filters for a specific direction
+func (m *TCFirewallManager) removeFiltersForDirection(iface netlink.Link, parent uint32, direction string) error {
+	// List all filters for this direction
+	filters, err := netlink.FilterList(iface, parent)
+	if err != nil {
+		fmt.Printf("Warning: failed to list %s filters: %v\n", direction, err)
+		return err
+	}
+
+	var errors []error
+	removedCount := 0
+
+	for _, filter := range filters {
+		if bpfFilter, ok := filter.(*netlink.BpfFilter); ok {
+			// Check if this is one of our firewall filters
+			if bpfFilter.Name == fmt.Sprintf("tc_%s_firewall", direction) {
+				if err := netlink.FilterDel(filter); err != nil {
+					fmt.Printf("Warning: failed to remove TC %s filter (handle %d): %v\n", direction, bpfFilter.Handle, err)
+					errors = append(errors, err)
+				} else {
+					removedCount++
+					fmt.Printf("Removed TC %s filter (handle %d)\n", direction, bpfFilter.Handle)
+				}
+			}
+		}
+	}
+
+	if removedCount == 0 && len(errors) == 0 {
+		fmt.Printf("No TC %s filters found to remove\n", direction)
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("failed to remove %d %s filters", len(errors), direction)
+	}
+
+	return nil
+}
+
+// IsAttached checks if TC programs are attached to the interface
+func (m *TCFirewallManager) IsAttached() (bool, error) {
+	if m.iface == "" {
+		return false, fmt.Errorf("interface name not specified")
+	}
+
+	// Get the network interface
+	iface, err := netlink.LinkByName(m.iface)
+	if err != nil {
+		return false, fmt.Errorf("failed to get interface %s: %v", m.iface, err)
+	}
+
+	// Check for ingress filters
+	hasIngress := m.hasFirewallFilter(iface, netlink.HANDLE_MIN_INGRESS, "tc_ingress_firewall")
+
+	// Check for egress filters
+	hasEgress := m.hasFirewallFilter(iface, netlink.HANDLE_MIN_EGRESS, "tc_egress_firewall")
+
+	return hasIngress && hasEgress, nil
+}
+
+// hasFirewallFilter checks if our firewall filter exists for a specific direction
+func (m *TCFirewallManager) hasFirewallFilter(iface netlink.Link, parent uint32, filterName string) bool {
+	filters, err := netlink.FilterList(iface, parent)
+	if err != nil {
+		return false
+	}
+
+	for _, filter := range filters {
+		if bpfFilter, ok := filter.(*netlink.BpfFilter); ok && bpfFilter.Name == filterName {
+			return true
+		}
+	}
+	return false
+}
+
+// SetInterface sets the interface name for TC program attachment
+func (m *TCFirewallManager) SetInterface(iface string) {
+	m.iface = iface
+}
+
+// GetInterface returns the current interface name
+func (m *TCFirewallManager) GetInterface() string {
+	return m.iface
 }
