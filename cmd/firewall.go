@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -52,12 +54,6 @@ func protocolNumberToString(protocol uint8) string {
 
 // MakeFirewallServer creates the firewall-server command
 func MakeFirewallServer() *cobra.Command {
-	var (
-		interfaceName string
-		listenAddr    string
-		pinPath       string
-	)
-
 	command := &cobra.Command{
 		Use:   "firewall-server",
 		Short: "Run unified XDP/TC firewall daemon with pinned maps",
@@ -69,11 +65,32 @@ The firewall uses pinned BPF maps that persist across program restarts,
 allowing external tools to interact with the firewall configuration.
 
 Both XDP and TC filtering modes are available simultaneously.`,
+	}
+
+	// Add subcommands
+	command.AddCommand(makeFirewallStartCmd())
+	command.AddCommand(makeFirewallCleanupMapsCmd())
+
+	return command
+}
+
+// makeFirewallStartCmd creates the start subcommand for firewall-server
+func makeFirewallStartCmd() *cobra.Command {
+	var (
+		interfaceName string
+		listenAddr    string
+		pinPath       string
+	)
+
+	command := &cobra.Command{
+		Use:   "start",
+		Short: "Start the firewall daemon",
+		Long:  `Start the unified eBPF firewall daemon with REST API`,
 		Example: `  # Start unified firewall server on eth0 with default settings
-  bgo firewall-server --interface eth0
+  bgo firewall-server start --interface eth0
 
   # Start with custom listen address and pin path
-  bgo firewall-server --interface eth0 --listen :8080 --pin-path /sys/fs/bpf/firewall
+  bgo firewall-server start --interface eth0 --listen :8080 --pin-path /sys/fs/bpf/firewall
 
   # Configure via XDP API (whitelist/blacklist)
   curl -X POST http://localhost:8080/api/rules/whitelist \
@@ -91,7 +108,40 @@ Both XDP and TC filtering modes are available simultaneously.`,
 
 	command.Flags().StringVarP(&interfaceName, "interface", "i", "eth0", "Network interface to attach firewall")
 	command.Flags().StringVar(&listenAddr, "listen", ":8080", "HTTP server listen address")
-	command.Flags().StringVar(&pinPath, "pin-path", "/sys/fs/bpf/firewall", "BPF filesystem pin path")
+	command.Flags().StringVar(&pinPath, "pin-path", firewall.PinPath, "BPF filesystem pin path")
+
+	return command
+}
+
+// makeFirewallCleanupMapsCmd creates the cleanup-maps subcommand
+func makeFirewallCleanupMapsCmd() *cobra.Command {
+	var (
+		pinPath string
+		force   bool
+	)
+
+	command := &cobra.Command{
+		Use:   "cleanup-maps",
+		Short: "Remove all pinned BPF maps",
+		Long: `Remove all pinned BPF maps from the filesystem. This is useful when map specifications 
+have changed and you need to recreate them with new parameters.
+
+WARNING: This will remove all firewall configuration and statistics!`,
+		Example: `  # Remove all pinned maps (will prompt for confirmation)
+  bgo firewall-server cleanup-maps
+
+  # Force cleanup without confirmation
+  bgo firewall-server cleanup-maps --force
+
+  # Cleanup maps from custom location
+  bgo firewall-server cleanup-maps --pin-path /custom/path`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runCleanupMaps(pinPath, force)
+		},
+	}
+
+	command.Flags().StringVar(&pinPath, "pin-path", firewall.PinPath, "BPF filesystem pin path")
+	command.Flags().BoolVar(&force, "force", false, "Force cleanup without confirmation")
 
 	return command
 }
@@ -1254,4 +1304,84 @@ func parseIPRange(ipRange string) (net.IP, net.IP, error) {
 		return nil, nil, fmt.Errorf("invalid IP address: %s", ipRange)
 	}
 	return ip, ip, nil
+}
+
+// runCleanupMaps removes all pinned BPF maps
+func runCleanupMaps(pinPath string, force bool) error {
+	// List of known firewall map names including TC maps
+	mapNames := []string{
+		// XDP firewall maps
+		"whitelist_map",
+		"blacklist_map",
+		"stats_map",
+		"config_map",
+		// LVS maps
+		"lvs_dnat_map",
+		"conn_track_map",
+		"backend_map",
+		"service_map",
+		// TC firewall maps
+		"tc_ingress_whitelist",
+		"tc_ingress_whitelist_count",
+		"tc_ingress_blacklist",
+		"tc_ingress_blacklist_count",
+		"tc_egress_whitelist",
+		"tc_egress_whitelist_count",
+		"tc_egress_blacklist",
+		"tc_egress_blacklist_count",
+		"tc_stats_map",
+	}
+
+	if !force {
+		fmt.Printf("WARNING: This will remove all pinned BPF maps and firewall configuration!\n")
+		fmt.Printf("Maps to be removed from %s:\n", pinPath)
+		for _, mapName := range mapNames {
+			mapPath := filepath.Join(pinPath, mapName)
+			if _, err := os.Stat(mapPath); err == nil {
+				fmt.Printf("  - %s\n", mapPath)
+			}
+		}
+		fmt.Printf("\nAre you sure you want to continue? (y/N): ")
+
+		reader := bufio.NewReader(os.Stdin)
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("failed to read input: %v", err)
+		}
+
+		response = strings.TrimSpace(strings.ToLower(response))
+		if response != "y" && response != "yes" {
+			fmt.Println("Operation cancelled")
+			return nil
+		}
+	}
+
+	removedCount := 0
+	for _, mapName := range mapNames {
+		mapPath := filepath.Join(pinPath, mapName)
+
+		// Check if map exists
+		if _, err := os.Stat(mapPath); os.IsNotExist(err) {
+			continue
+		}
+
+		// Remove the pinned map
+		err := os.Remove(mapPath)
+		if err != nil {
+			fmt.Printf("Warning: failed to remove %s: %v\n", mapPath, err)
+			continue
+		}
+
+		fmt.Printf("Removed: %s\n", mapPath)
+		removedCount++
+	}
+
+	if removedCount == 0 {
+		fmt.Printf("No maps found to remove in %s\n", pinPath)
+	} else {
+		fmt.Printf("Successfully removed %d BPF maps\n", removedCount)
+		fmt.Printf("You can now restart the firewall to recreate maps with new specifications\n")
+	}
+
+	return nil
 }

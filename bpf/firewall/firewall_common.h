@@ -1,3 +1,3 @@
 //go:build ignore
 
-#define MAX_RULES 10
+#define MAX_RULES 100

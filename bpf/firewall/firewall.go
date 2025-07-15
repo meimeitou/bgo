@@ -21,7 +21,7 @@ import (
 
 const (
 	// MaxRules defines the maximum number of rules we can handle (using #pragma unroll)
-	MaxRules = 10
+	MaxRules = 100
 	PinPath  = "/sys/fs/bpf/firewall"
 )
 
@@ -44,6 +44,7 @@ const (
 	ConfigWhitelistEnabled = 0
 	ConfigBlacklistEnabled = 1
 	ConfigDefaultAction    = 2
+	ConfigLvsEnabled       = 3
 )
 
 // TC firewall constants
@@ -221,7 +222,7 @@ func (fw *XDPFirewall) loadFromPinned() error {
 	}
 
 	fw.objs = &firewallObjects{}
-	fw.objs.XdpFirewall = prog
+	fw.objs.XdpFirewallWithLvs = prog
 	fw.objs.WhitelistMap = whitelistMap
 	fw.objs.BlacklistMap = blacklistMap
 	fw.objs.StatsMap = statsMap
@@ -267,7 +268,7 @@ func (fw *XDPFirewall) Attach() error {
 	}
 
 	l, err := link.AttachXDP(link.XDPOptions{
-		Program:   fw.objs.XdpFirewall,
+		Program:   fw.objs.XdpFirewallWithLvs,
 		Interface: iface.Index,
 		Flags:     link.XDPGenericMode,
 	})

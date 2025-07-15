@@ -13,6 +13,39 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type firewallBackendServer struct {
+	_       structs.HostLayout
+	Ip      uint32
+	Port    uint16
+	Weight  uint8
+	Enabled uint8
+}
+
+type firewallConnTrack struct {
+	_                structs.HostLayout
+	ClientIp         uint32
+	ClientPort       uint16
+	_                [2]byte
+	OriginalDestIp   uint32
+	OriginalDestPort uint16
+	_                [2]byte
+	TargetIp         uint32
+	TargetPort       uint16
+	_                [2]byte
+	Timestamp        uint64
+}
+
+type firewallDnatRule struct {
+	_            structs.HostLayout
+	OriginalIp   uint32
+	OriginalPort uint16
+	_            [2]byte
+	TargetIp     uint32
+	TargetPort   uint16
+	Protocol     uint8
+	Enabled      uint8
+}
+
 type firewallFwRule struct {
 	_        structs.HostLayout
 	IpStart  uint32
@@ -27,6 +60,17 @@ type firewallFwStats struct {
 	TotalPackets   uint64
 	AllowedPackets uint64
 	BlockedPackets uint64
+}
+
+type firewallServiceConfig struct {
+	_            structs.HostLayout
+	Vip          uint32
+	Vport        uint16
+	Protocol     uint8
+	Scheduler    uint8
+	BackendCount uint32
+	Enabled      uint8
+	Padding      [3]uint8
 }
 
 // loadFirewall returns the embedded CollectionSpec for firewall.
@@ -71,15 +115,19 @@ type firewallSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type firewallProgramSpecs struct {
-	XdpFirewall *ebpf.ProgramSpec `ebpf:"xdp_firewall"`
+	XdpFirewallWithLvs *ebpf.ProgramSpec `ebpf:"xdp_firewall_with_lvs"`
 }
 
 // firewallMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type firewallMapSpecs struct {
+	BackendMap   *ebpf.MapSpec `ebpf:"backend_map"`
 	BlacklistMap *ebpf.MapSpec `ebpf:"blacklist_map"`
 	ConfigMap    *ebpf.MapSpec `ebpf:"config_map"`
+	ConnTrackMap *ebpf.MapSpec `ebpf:"conn_track_map"`
+	LvsDnatMap   *ebpf.MapSpec `ebpf:"lvs_dnat_map"`
+	ServiceMap   *ebpf.MapSpec `ebpf:"service_map"`
 	StatsMap     *ebpf.MapSpec `ebpf:"stats_map"`
 	WhitelistMap *ebpf.MapSpec `ebpf:"whitelist_map"`
 }
@@ -110,16 +158,24 @@ func (o *firewallObjects) Close() error {
 //
 // It can be passed to loadFirewallObjects or ebpf.CollectionSpec.LoadAndAssign.
 type firewallMaps struct {
+	BackendMap   *ebpf.Map `ebpf:"backend_map"`
 	BlacklistMap *ebpf.Map `ebpf:"blacklist_map"`
 	ConfigMap    *ebpf.Map `ebpf:"config_map"`
+	ConnTrackMap *ebpf.Map `ebpf:"conn_track_map"`
+	LvsDnatMap   *ebpf.Map `ebpf:"lvs_dnat_map"`
+	ServiceMap   *ebpf.Map `ebpf:"service_map"`
 	StatsMap     *ebpf.Map `ebpf:"stats_map"`
 	WhitelistMap *ebpf.Map `ebpf:"whitelist_map"`
 }
 
 func (m *firewallMaps) Close() error {
 	return _FirewallClose(
+		m.BackendMap,
 		m.BlacklistMap,
 		m.ConfigMap,
+		m.ConnTrackMap,
+		m.LvsDnatMap,
+		m.ServiceMap,
 		m.StatsMap,
 		m.WhitelistMap,
 	)
@@ -135,12 +191,12 @@ type firewallVariables struct {
 //
 // It can be passed to loadFirewallObjects or ebpf.CollectionSpec.LoadAndAssign.
 type firewallPrograms struct {
-	XdpFirewall *ebpf.Program `ebpf:"xdp_firewall"`
+	XdpFirewallWithLvs *ebpf.Program `ebpf:"xdp_firewall_with_lvs"`
 }
 
 func (p *firewallPrograms) Close() error {
 	return _FirewallClose(
-		p.XdpFirewall,
+		p.XdpFirewallWithLvs,
 	)
 }
 
