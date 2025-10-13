@@ -444,9 +444,12 @@ type RuleResponse struct {
 }
 
 type StatsResponse struct {
-	TotalPackets   uint64 `json:"total_packets"`
-	AllowedPackets uint64 `json:"allowed_packets"`
-	BlockedPackets uint64 `json:"blocked_packets"`
+	TotalPackets    uint64 `json:"total_packets"`
+	AllowedPackets  uint64 `json:"allowed_packets"`
+	BlockedPackets  uint64 `json:"blocked_packets"`
+	LvsDnatPackets  uint64 `json:"lvs_dnat_packets"`
+	LvsSnatPackets  uint64 `json:"lvs_snat_packets"`
+	LvsTotalPackets uint64 `json:"lvs_total_packets"`
 }
 
 // TC Rule request/response structures
@@ -513,9 +516,12 @@ func (s *FirewallServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := StatsResponse{
-		TotalPackets:   stats.TotalPackets,
-		AllowedPackets: stats.AllowedPackets,
-		BlockedPackets: stats.BlockedPackets,
+		TotalPackets:    stats.TotalPackets,
+		AllowedPackets:  stats.AllowedPackets,
+		BlockedPackets:  stats.BlockedPackets,
+		LvsDnatPackets:  stats.LvsDnatPackets,
+		LvsSnatPackets:  stats.LvsSnatPackets,
+		LvsTotalPackets: stats.LvsTotalPackets,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -996,6 +1002,16 @@ func runFirewallUpdate(pinPath, ruleType, action, ipRange string, port uint16, p
 			if stats.TotalPackets > 0 {
 				fmt.Printf("Allow Rate:      %.2f%%\n", float64(stats.AllowedPackets)/float64(stats.TotalPackets)*100)
 				fmt.Printf("Block Rate:      %.2f%%\n", float64(stats.BlockedPackets)/float64(stats.TotalPackets)*100)
+			}
+
+			// Display LVS statistics
+			fmt.Printf("\nLVS Statistics:\n")
+			fmt.Printf("LVS Total Packets: %d\n", stats.LvsTotalPackets)
+			fmt.Printf("DNAT Packets:      %d\n", stats.LvsDnatPackets)
+			fmt.Printf("SNAT Packets:      %d\n", stats.LvsSnatPackets)
+			if stats.LvsTotalPackets > 0 {
+				fmt.Printf("DNAT Rate:         %.2f%%\n", float64(stats.LvsDnatPackets)/float64(stats.LvsTotalPackets)*100)
+				fmt.Printf("SNAT Rate:         %.2f%%\n", float64(stats.LvsSnatPackets)/float64(stats.LvsTotalPackets)*100)
 			}
 
 		default:

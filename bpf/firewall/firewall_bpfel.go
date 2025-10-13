@@ -25,13 +25,13 @@ type firewallConnTrack struct {
 	_                structs.HostLayout
 	ClientIp         uint32
 	ClientPort       uint16
-	_                [2]byte
+	Pad1             uint16
 	OriginalDestIp   uint32
 	OriginalDestPort uint16
-	_                [2]byte
+	Pad2             uint16
 	TargetIp         uint32
 	TargetPort       uint16
-	_                [2]byte
+	Pad3             uint16
 	Timestamp        uint64
 }
 
@@ -39,7 +39,7 @@ type firewallDnatRule struct {
 	_            structs.HostLayout
 	OriginalIp   uint32
 	OriginalPort uint16
-	_            [2]byte
+	Pad1         uint16
 	TargetIp     uint32
 	TargetPort   uint16
 	Protocol     uint8
@@ -56,10 +56,13 @@ type firewallFwRule struct {
 }
 
 type firewallFwStats struct {
-	_              structs.HostLayout
-	TotalPackets   uint64
-	AllowedPackets uint64
-	BlockedPackets uint64
+	_               structs.HostLayout
+	TotalPackets    uint64
+	AllowedPackets  uint64
+	BlockedPackets  uint64
+	LvsDnatPackets  uint64
+	LvsSnatPackets  uint64
+	LvsTotalPackets uint64
 }
 
 type firewallServiceConfig struct {
@@ -122,14 +125,16 @@ type firewallProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type firewallMapSpecs struct {
-	BackendMap   *ebpf.MapSpec `ebpf:"backend_map"`
-	BlacklistMap *ebpf.MapSpec `ebpf:"blacklist_map"`
-	ConfigMap    *ebpf.MapSpec `ebpf:"config_map"`
-	ConnTrackMap *ebpf.MapSpec `ebpf:"conn_track_map"`
-	LvsDnatMap   *ebpf.MapSpec `ebpf:"lvs_dnat_map"`
-	ServiceMap   *ebpf.MapSpec `ebpf:"service_map"`
-	StatsMap     *ebpf.MapSpec `ebpf:"stats_map"`
-	WhitelistMap *ebpf.MapSpec `ebpf:"whitelist_map"`
+	BackendMap    *ebpf.MapSpec `ebpf:"backend_map"`
+	BlacklistMap  *ebpf.MapSpec `ebpf:"blacklist_map"`
+	ConfigMap     *ebpf.MapSpec `ebpf:"config_map"`
+	ConnTrackMap  *ebpf.MapSpec `ebpf:"conn_track_map"`
+	DebugCounters *ebpf.MapSpec `ebpf:"debug_counters"`
+	DebugMap      *ebpf.MapSpec `ebpf:"debug_map"`
+	LvsDnatMap    *ebpf.MapSpec `ebpf:"lvs_dnat_map"`
+	ServiceMap    *ebpf.MapSpec `ebpf:"service_map"`
+	StatsMap      *ebpf.MapSpec `ebpf:"stats_map"`
+	WhitelistMap  *ebpf.MapSpec `ebpf:"whitelist_map"`
 }
 
 // firewallVariableSpecs contains global variables before they are loaded into the kernel.
@@ -158,14 +163,16 @@ func (o *firewallObjects) Close() error {
 //
 // It can be passed to loadFirewallObjects or ebpf.CollectionSpec.LoadAndAssign.
 type firewallMaps struct {
-	BackendMap   *ebpf.Map `ebpf:"backend_map"`
-	BlacklistMap *ebpf.Map `ebpf:"blacklist_map"`
-	ConfigMap    *ebpf.Map `ebpf:"config_map"`
-	ConnTrackMap *ebpf.Map `ebpf:"conn_track_map"`
-	LvsDnatMap   *ebpf.Map `ebpf:"lvs_dnat_map"`
-	ServiceMap   *ebpf.Map `ebpf:"service_map"`
-	StatsMap     *ebpf.Map `ebpf:"stats_map"`
-	WhitelistMap *ebpf.Map `ebpf:"whitelist_map"`
+	BackendMap    *ebpf.Map `ebpf:"backend_map"`
+	BlacklistMap  *ebpf.Map `ebpf:"blacklist_map"`
+	ConfigMap     *ebpf.Map `ebpf:"config_map"`
+	ConnTrackMap  *ebpf.Map `ebpf:"conn_track_map"`
+	DebugCounters *ebpf.Map `ebpf:"debug_counters"`
+	DebugMap      *ebpf.Map `ebpf:"debug_map"`
+	LvsDnatMap    *ebpf.Map `ebpf:"lvs_dnat_map"`
+	ServiceMap    *ebpf.Map `ebpf:"service_map"`
+	StatsMap      *ebpf.Map `ebpf:"stats_map"`
+	WhitelistMap  *ebpf.Map `ebpf:"whitelist_map"`
 }
 
 func (m *firewallMaps) Close() error {
@@ -174,6 +181,8 @@ func (m *firewallMaps) Close() error {
 		m.BlacklistMap,
 		m.ConfigMap,
 		m.ConnTrackMap,
+		m.DebugCounters,
+		m.DebugMap,
 		m.LvsDnatMap,
 		m.ServiceMap,
 		m.StatsMap,

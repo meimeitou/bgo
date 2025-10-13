@@ -115,7 +115,63 @@ Client IP       Port   Original VIP    Port   Target IP       Port
 Total active connections: 2
 ```
 
-### 5. 启用/禁用 LVS
+### 5. 查看 LVS 统计信息
+
+```bash
+# 查看包含 LVS 统计的完整防火墙统计信息
+sudo ./bin/bgo firewall-update --action stats --xdp
+```
+
+输出示例：
+```
+Firewall Statistics:
+Total Packets:   1000
+Allowed Packets: 950
+Blocked Packets: 50
+Allow Rate:      95.00%
+Block Rate:      5.00%
+
+LVS Statistics:
+LVS Total Packets: 200
+DNAT Packets:      120
+SNAT Packets:      80
+DNAT Rate:         60.00%
+SNAT Rate:         40.00%
+```
+
+**统计字段说明：**
+- `LVS Total Packets`: LVS 处理的总数据包数量
+- `DNAT Packets`: 进行了目的地址转换的数据包数量（入站流量）
+- `SNAT Packets`: 进行了源地址转换的数据包数量（返回流量）
+- `DNAT Rate`: DNAT 包占 LVS 总处理包的比例
+- `SNAT Rate`: SNAT 包占 LVS 总处理包的比例
+
+**也可以使用专门的 LVS 统计命令：**
+
+```bash
+# 查看专门的 LVS 统计信息
+sudo ./bin/bgo firewall-lvs stats
+```
+
+输出示例：
+```
+=== LVS NAT Statistics ===
+LVS Total Packets: 200
+DNAT Packets:      120
+SNAT Packets:      80
+DNAT Rate:         60.00%
+SNAT Rate:         40.00%
+
+=== Overall Firewall Statistics ===
+Total Packets:     1000
+Allowed Packets:   950
+Blocked Packets:   50
+Allow Rate:        95.00%
+Block Rate:        5.00%
+LVS Processing Rate: 20.00%
+```
+
+### 6. 启用/禁用 LVS
 
 ```bash
 # 启用 LVS
@@ -125,7 +181,7 @@ sudo ./bin/bgo firewall-lvs enable
 sudo ./bin/bgo firewall-lvs disable
 ```
 
-### 6. 清理连接跟踪
+### 7. 清理连接跟踪
 
 ```bash
 sudo ./bin/bgo firewall-lvs cleanup
@@ -221,6 +277,31 @@ sudo ./bin/bgo firewall-lvs add-dnat \
 2. **连接跟踪**：使用 LRU Hash 表自动清理旧连接
 3. **校验和更新**：增量更新 IP/TCP/UDP 校验和
 4. **防火墙集成**：防火墙过滤在 LVS 处理之前执行
+
+## 测试环境
+
+### 自动化测试脚本
+
+项目提供了一个测试环境脚本，可以快速创建隔离的网络环境来测试防火墙和 LVS 功能：
+
+```bash
+# 创建基本测试环境
+sudo ./scripts/testenv.sh --legacy-ip setup
+
+# 查看环境状态
+sudo ./scripts/testenv.sh status
+
+# 进入测试环境
+sudo ./scripts/testenv.sh enter
+
+# 运行示例测试
+sudo ./scripts/demo.sh
+
+# 清理环境
+sudo ./scripts/testenv.sh teardown
+```
+
+详细使用说明请参考 `scripts/README.md`。
 
 ## 故障排查
 

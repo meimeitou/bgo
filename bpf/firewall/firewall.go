@@ -68,9 +68,12 @@ type Rule struct {
 
 // Stats represents firewall statistics
 type Stats struct {
-	TotalPackets   uint64 `json:"total_packets"`
-	AllowedPackets uint64 `json:"allowed_packets"`
-	BlockedPackets uint64 `json:"blocked_packets"`
+	TotalPackets    uint64 `json:"total_packets"`
+	AllowedPackets  uint64 `json:"allowed_packets"`
+	BlockedPackets  uint64 `json:"blocked_packets"`
+	LvsDnatPackets  uint64 `json:"lvs_dnat_packets"`
+	LvsSnatPackets  uint64 `json:"lvs_snat_packets"`
+	LvsTotalPackets uint64 `json:"lvs_total_packets"`
 }
 
 // TCRule represents a TC firewall rule with whitelist/blacklist support
@@ -398,9 +401,12 @@ func (fw *XDPFirewall) GetStats() (*Stats, error) {
 	}
 
 	return &Stats{
-		TotalPackets:   bpfStats.TotalPackets,
-		AllowedPackets: bpfStats.AllowedPackets,
-		BlockedPackets: bpfStats.BlockedPackets,
+		TotalPackets:    bpfStats.TotalPackets,
+		AllowedPackets:  bpfStats.AllowedPackets,
+		BlockedPackets:  bpfStats.BlockedPackets,
+		LvsDnatPackets:  bpfStats.LvsDnatPackets,
+		LvsSnatPackets:  bpfStats.LvsSnatPackets,
+		LvsTotalPackets: bpfStats.LvsTotalPackets,
 	}, nil
 }
 
@@ -613,9 +619,12 @@ func (fm *FirewallManager) GetStats() (*Stats, error) {
 	}
 
 	return &Stats{
-		TotalPackets:   bpfStats.TotalPackets,
-		AllowedPackets: bpfStats.AllowedPackets,
-		BlockedPackets: bpfStats.BlockedPackets,
+		TotalPackets:    bpfStats.TotalPackets,
+		AllowedPackets:  bpfStats.AllowedPackets,
+		BlockedPackets:  bpfStats.BlockedPackets,
+		LvsDnatPackets:  bpfStats.LvsDnatPackets,
+		LvsSnatPackets:  bpfStats.LvsSnatPackets,
+		LvsTotalPackets: bpfStats.LvsTotalPackets,
 	}, nil
 }
 

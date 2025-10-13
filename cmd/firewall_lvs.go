@@ -1,12 +1,18 @@
 package cmd
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
+	"os/signal"
 	"strings"
+	"time"
+	"unsafe"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/meimeitou/bgo/bpf/firewall"
 	"github.com/spf13/cobra"
 )
@@ -87,6 +93,22 @@ var cleanupLvsCmd = &cobra.Command{
 	RunE:  runLvsCleanup,
 }
 
+// statsLvsCmd represents the stats command
+var statsLvsCmd = &cobra.Command{
+	Use:   "stats",
+	Short: "Show LVS statistics",
+	Long:  `Show detailed LVS NAT processing statistics including DNAT/SNAT packet counts`,
+	RunE:  runLvsStats,
+}
+
+// debugLvsCmd represents the debug command
+var debugLvsCmd = &cobra.Command{
+	Use:   "debug",
+	Short: "Show LVS debug information",
+	Long:  `Show detailed debug information from LVS processing including counters and events`,
+	RunE:  runLvsDebug,
+}
+
 func init() {
 	RootCmd.AddCommand(firewallLvsCmd)
 
@@ -98,6 +120,8 @@ func init() {
 	firewallLvsCmd.AddCommand(disableLvsCmd)
 	firewallLvsCmd.AddCommand(statusLvsCmd)
 	firewallLvsCmd.AddCommand(cleanupLvsCmd)
+	firewallLvsCmd.AddCommand(statsLvsCmd)
+	firewallLvsCmd.AddCommand(debugLvsCmd)
 
 	// Add flags for add-dnat command
 	addDnatCmd.Flags().StringVar(&vip, "vip", "", "Virtual IP address (required)")
@@ -123,24 +147,112 @@ func init() {
 
 // DNAT rule structure matching BPF side
 type DnatRule struct {
-	OriginalIP   uint32  // 4 bytes
-	OriginalPort uint16  // 2 bytes
-	TargetIP     uint32  // 4 bytes
-	TargetPort   uint16  // 2 bytes
-	Protocol     uint8   // 1 byte
-	Enabled      uint8   // 1 byte
-	_            [2]byte // 2 bytes padding to make total 16 bytes
+	OriginalIP   uint32 // 4 bytes
+	OriginalPort uint16 // 2 bytes
+	_            uint16 // 2 bytes padding (对应 C 结构中的 _pad1)
+	TargetIP     uint32 // 4 bytes
+	TargetPort   uint16 // 2 bytes
+	Protocol     uint8  // 1 byte
+	Enabled      uint8  // 1 byte
+	// 总共 16 字节，与 C 结构体大小匹配
 }
 
 // Connection tracking structure
 type ConnTrack struct {
 	ClientIP         uint32
 	ClientPort       uint16
+	_                uint16 // padding
 	OriginalDestIP   uint32
 	OriginalDestPort uint16
+	_                uint16 // padding
 	TargetIP         uint32
 	TargetPort       uint16
+	_                uint16 // padding
 	Timestamp        uint64
+}
+
+// Debug info structure matching BPF side
+type DebugInfo struct {
+	Timestamp uint64
+	SrcIP     uint32
+	DstIP     uint32
+	SrcPort   uint16
+	DstPort   uint16
+	Protocol  uint8
+	Stage     uint8
+	RuleIndex uint8
+	Result    uint8
+}
+
+// Debug counter names
+var debugCounterNames = map[uint32]string{
+	0: "总数据包数",
+	1: "LVS已启用",
+	2: "DNAT规则查找",
+	3: "DNAT规则检查",
+	4: "DNAT匹配成功",
+	5: "SNAT规则查找",
+	6: "SNAT匹配成功",
+	7: "新连接创建",
+	8: "连接复用",
+}
+
+// Debug stage names
+var debugStageNames = map[uint8]string{
+	0: "入口",
+	1: "DNAT查找",
+	2: "DNAT匹配",
+	3: "SNAT查找",
+	4: "SNAT匹配",
+	5: "连接跟踪",
+}
+
+// Debug result names
+var debugResultNames = map[uint8]string{
+	0: "继续处理",
+	1: "匹配成功",
+	2: "匹配失败",
+	3: "创建连接",
+	4: "复用连接",
+	5: "丢弃",
+}
+
+// Helper function to convert uint32 IP to string
+func uint32ToIP(ip uint32) string {
+	return fmt.Sprintf("%d.%d.%d.%d",
+		byte(ip), byte(ip>>8), byte(ip>>16), byte(ip>>24))
+}
+
+// Helper function to format protocol
+func formatProtocol(proto uint8) string {
+	switch proto {
+	case 6:
+		return "TCP"
+	case 17:
+		return "UDP"
+	default:
+		return fmt.Sprintf("Proto-%d", proto)
+	}
+}
+
+// Helper function to format debug info
+func formatDebugInfo(info *DebugInfo) string {
+	timestamp := time.Unix(0, int64(info.Timestamp))
+	stage := debugStageNames[info.Stage]
+	if stage == "" {
+		stage = fmt.Sprintf("Stage-%d", info.Stage)
+	}
+	result := debugResultNames[info.Result]
+	if result == "" {
+		result = fmt.Sprintf("Result-%d", info.Result)
+	}
+
+	return fmt.Sprintf("[%s] %s:%d -> %s:%d (%s) [%s] 规则#%d -> %s",
+		timestamp.Format("15:04:05.000"),
+		uint32ToIP(info.SrcIP), info.SrcPort,
+		uint32ToIP(info.DstIP), info.DstPort,
+		formatProtocol(info.Protocol),
+		stage, info.RuleIndex, result)
 }
 
 func runAddDnat(cmd *cobra.Command, args []string) error {
@@ -222,10 +334,10 @@ func runAddDnat(cmd *cobra.Command, args []string) error {
 
 	// Create new rule
 	rule := DnatRule{
-		OriginalIP:   binary.BigEndian.Uint32(vipAddr.To4()),
-		OriginalPort: uint16(vport),
-		TargetIP:     binary.BigEndian.Uint32(ripAddr.To4()),
-		TargetPort:   uint16(rport),
+		OriginalIP:   binary.BigEndian.Uint32(vipAddr.To4()), // IP 地址使用网络字节序
+		OriginalPort: uint16(vport),                          // 端口使用主机字节序
+		TargetIP:     binary.BigEndian.Uint32(ripAddr.To4()), // IP 地址使用网络字节序
+		TargetPort:   uint16(rport),                          // 端口使用主机字节序
 		Protocol:     proto,
 		Enabled:      1,
 	}
@@ -482,6 +594,278 @@ func runLvsCleanup(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Connection tracking table uses LRU eviction - old entries are automatically cleaned up\n")
 	fmt.Printf("Manual cleanup completed\n")
+
+	return nil
+}
+
+func runLvsStats(cmd *cobra.Command, args []string) error {
+	// Load the pinned stats map
+	m, err := ebpf.LoadPinnedMap(firewall.PinPath+"/stats_map", &ebpf.LoadPinOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to load stats_map: %v", err)
+	}
+	defer m.Close()
+
+	// Get statistics
+	var stats struct {
+		TotalPackets    uint64
+		AllowedPackets  uint64
+		BlockedPackets  uint64
+		LvsDnatPackets  uint64
+		LvsSnatPackets  uint64
+		LvsTotalPackets uint64
+	}
+
+	err = m.Lookup(uint32(0), &stats)
+	if err != nil {
+		return fmt.Errorf("failed to get statistics: %v", err)
+	}
+
+	fmt.Printf("=== LVS NAT Statistics ===\n")
+	fmt.Printf("LVS Total Packets: %d\n", stats.LvsTotalPackets)
+	fmt.Printf("DNAT Packets:      %d\n", stats.LvsDnatPackets)
+	fmt.Printf("SNAT Packets:      %d\n", stats.LvsSnatPackets)
+
+	if stats.LvsTotalPackets > 0 {
+		fmt.Printf("DNAT Rate:         %.2f%%\n", float64(stats.LvsDnatPackets)/float64(stats.LvsTotalPackets)*100)
+		fmt.Printf("SNAT Rate:         %.2f%%\n", float64(stats.LvsSnatPackets)/float64(stats.LvsTotalPackets)*100)
+	}
+
+	fmt.Printf("\n=== Overall Firewall Statistics ===\n")
+	fmt.Printf("Total Packets:     %d\n", stats.TotalPackets)
+	fmt.Printf("Allowed Packets:   %d\n", stats.AllowedPackets)
+	fmt.Printf("Blocked Packets:   %d\n", stats.BlockedPackets)
+
+	if stats.TotalPackets > 0 {
+		fmt.Printf("Allow Rate:        %.2f%%\n", float64(stats.AllowedPackets)/float64(stats.TotalPackets)*100)
+		fmt.Printf("Block Rate:        %.2f%%\n", float64(stats.BlockedPackets)/float64(stats.TotalPackets)*100)
+
+		if stats.LvsTotalPackets > 0 {
+			fmt.Printf("LVS Processing Rate: %.2f%%\n", float64(stats.LvsTotalPackets)/float64(stats.TotalPackets)*100)
+		}
+	}
+
+	return nil
+}
+
+// Helper functions for debug command
+func getProtocolName(proto uint8) string {
+	switch proto {
+	case 1:
+		return "ICMP"
+	case 6:
+		return "TCP"
+	case 17:
+		return "UDP"
+	default:
+		return fmt.Sprintf("协议%d", proto)
+	}
+}
+
+func getStageName(stage uint8) string {
+	switch stage {
+	case 0:
+		return "LVS入口"
+	case 1:
+		return "DNAT查找"
+	case 2:
+		return "DNAT匹配"
+	case 3:
+		return "SNAT查找"
+	case 4:
+		return "SNAT匹配"
+	case 99:
+		return "LVS结果"
+	default:
+		return fmt.Sprintf("阶段%d", stage)
+	}
+}
+
+func runLvsDebug(cmd *cobra.Command, args []string) error {
+	subCommand := "counters"
+	if len(args) > 0 {
+		subCommand = args[0]
+	}
+
+	switch subCommand {
+	case "counters":
+		return showDebugCounters()
+	case "clear":
+		return clearDebugCounters()
+	case "events":
+		return showDebugEvents()
+	case "monitor":
+		return monitorDebugCounters()
+	default:
+		fmt.Printf("使用方法:\n")
+		fmt.Printf("  %s firewall-lvs debug [子命令]\n\n", cmd.Root().Name())
+		fmt.Printf("可用子命令:\n")
+		fmt.Printf("  counters    显示调试计数器\n")
+		fmt.Printf("  clear       清空调试计数器\n")
+		fmt.Printf("  events      显示调试事件 (实验性)\n")
+		fmt.Printf("  monitor     实时监控计数器\n")
+		fmt.Printf("\n示例:\n")
+		fmt.Printf("  %s firewall-lvs debug counters\n", cmd.Root().Name())
+		fmt.Printf("  %s firewall-lvs debug monitor\n", cmd.Root().Name())
+		return nil
+	}
+}
+
+func showDebugCounters() error {
+	// Load debug counters map
+	m, err := ebpf.LoadPinnedMap(firewall.PinPath+"/debug_counters", &ebpf.LoadPinOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to load debug_counters map: %v", err)
+	}
+	defer m.Close()
+
+	fmt.Printf("=== LVS 调试计数器 ===\n")
+	fmt.Printf("时间: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+	fmt.Println()
+	fmt.Printf("%-8s | %-14s | %s\n", "计数器ID", "名称", "数值")
+	fmt.Printf("---------|----------------|----------\n")
+
+	for i := uint32(0); i <= 8; i++ {
+		var value uint64
+		err := m.Lookup(i, &value)
+		if err != nil {
+			continue
+		}
+
+		name, exists := debugCounterNames[i]
+		if !exists {
+			name = "未知"
+		}
+
+		fmt.Printf("%-8d | %-14s | %d\n", i, name, value)
+	}
+	fmt.Println()
+
+	return nil
+}
+
+func clearDebugCounters() error {
+	// Load debug counters map
+	m, err := ebpf.LoadPinnedMap(firewall.PinPath+"/debug_counters", &ebpf.LoadPinOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to load debug_counters map: %v", err)
+	}
+	defer m.Close()
+
+	fmt.Println("清空调试计数器...")
+
+	for i := uint32(0); i <= 8; i++ {
+		var zero uint64 = 0
+		err := m.Update(i, zero, ebpf.UpdateAny)
+		if err != nil {
+			fmt.Printf("警告: 无法清空计数器 %d: %v\n", i, err)
+		}
+	}
+
+	fmt.Println("调试计数器已清空")
+	return nil
+}
+
+func showDebugEvents() error {
+	fmt.Println("=== LVS 调试事件 (Ring Buffer) ===")
+	fmt.Println("按 Ctrl+C 停止事件监控")
+	fmt.Println()
+
+	// Load the debug ring buffer map
+	m, err := ebpf.LoadPinnedMap(firewall.PinPath+"/debug_map", &ebpf.LoadPinOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to load debug_map: %v", err)
+	}
+	defer m.Close()
+
+	// Create a ring buffer reader
+	rd, err := ringbuf.NewReader(m)
+	if err != nil {
+		return fmt.Errorf("failed to create ring buffer reader: %v", err)
+	}
+	defer rd.Close()
+
+	// Setup signal handling
+	ctx, cancel := context.WithCancel(context.Background())
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+
+	go func() {
+		<-c
+		fmt.Println("\n事件监控已停止")
+		cancel()
+	}()
+
+	// Start reading events
+	fmt.Println("等待调试事件...")
+	eventCount := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Printf("\n总共收到 %d 个调试事件\n", eventCount)
+			return nil
+		default:
+			// Read the next record from the ring buffer
+			record, err := rd.Read()
+			if err != nil {
+				if err == ringbuf.ErrClosed {
+					return nil
+				}
+				continue // Skip errors and continue reading
+			}
+
+			// Parse the debug info
+			if len(record.RawSample) < int(unsafe.Sizeof(DebugInfo{})) {
+				continue // Skip malformed records
+			}
+
+			var info DebugInfo
+			data := record.RawSample
+			info.Timestamp = binary.LittleEndian.Uint64(data[0:8])
+			info.SrcIP = binary.LittleEndian.Uint32(data[8:12])
+			info.DstIP = binary.LittleEndian.Uint32(data[12:16])
+			info.SrcPort = binary.LittleEndian.Uint16(data[16:18])
+			info.DstPort = binary.LittleEndian.Uint16(data[18:20])
+			info.Protocol = data[20]
+			info.Stage = data[21]
+			info.RuleIndex = data[22]
+			info.Result = data[23]
+
+			// Format and display the debug info
+			fmt.Println(formatDebugInfo(&info))
+			eventCount++
+		}
+	}
+}
+
+func monitorDebugCounters() error {
+	fmt.Println("=== 实时监控 LVS 调试计数器 ===")
+	fmt.Println("按 Ctrl+C 停止监控")
+	fmt.Println()
+
+	// 使用信号处理来优雅退出
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	go func() {
+		<-c
+		fmt.Println("\n监控已停止")
+		os.Exit(0)
+	}()
+
+	for range ticker.C {
+		// 清屏 (在支持的终端中)
+		fmt.Print("\033[2J\033[H")
+
+		err := showDebugCounters()
+		if err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
