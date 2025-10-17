@@ -44,6 +44,26 @@
 - 🏗️ [Rate Limit Pin 管理](docs/RATELIMIT_PIN_MANAGEMENT.md) - Pin 机制说明
 - 🔄 [Interface 参数移除](docs/INTERFACE_PARAM_REMOVAL.md) - 架构优化说明
 
+## 系统要求
+
+### 最小内核版本
+
+| 功能 | 最小版本 | 推荐版本 |
+|------|---------|---------|
+| **防火墙 + 限流** | Linux 4.18 | Linux 5.4+ |
+| **完整功能** | Linux 5.4 | Linux 5.10+ |
+
+详细信息请查看：
+- 📋 [内核要求详解](docs/KERNEL_REQUIREMENTS.md)
+- 🚀 [部署指南](docs/DEPLOYMENT.md)
+
+### 快速检查
+
+```bash
+# 检查系统兼容性
+./scripts/check_system.sh
+```
+
 ## 快速开始
 
 ### 构建项目
