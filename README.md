@@ -120,20 +120,6 @@ sudo ip addr add 192.168.63.100/24 dev enp0s8
 - Go 1.19+ 
 - 管理员权限 (eBPF 程序需要)
 
-## 项目结构
-
-```
-bgo/
-├── cmd/           # 命令行接口实现
-├── bpf/           # eBPF 程序源码
-│   ├── bashreadline/  # bash 监控功能
-│   ├── biosnoop/      # 磁盘 I/O 监控功能
-│   └── firewall/      # 防火墙功能
-├── lib/           # 依赖库 (libbpf, xdp-tools)
-├── pkg/           # 通用包
-└── scripts/       # 辅助脚本
-```
-
 ## 贡献指南
 
 我们欢迎社区贡献！请参考以下步骤：
