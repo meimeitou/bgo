@@ -149,17 +149,16 @@ WARNING: This will remove all firewall configuration and statistics!`,
 // MakeFirewallUpdate creates the firewall-update command
 func MakeFirewallUpdate() *cobra.Command {
 	var (
-		pinPath       string
-		ruleType      string
-		action        string
-		ipRange       string
-		port          uint16
-		protocolStr   string
-		ruleIndex     uint32
-		xdp           bool
-		ingress       bool
-		egress        bool
-		interfaceName string
+		pinPath     string
+		ruleType    string
+		action      string
+		ipRange     string
+		port        uint16
+		protocolStr string
+		ruleIndex   uint32
+		xdp         bool
+		ingress     bool
+		egress      bool
 	)
 
 	command := &cobra.Command{
@@ -236,7 +235,7 @@ Both XDP and TC modes support whitelist/blacklist rule types:
 			// Check if type was explicitly set by user
 			typeExplicitlySet := cmd.Flags().Changed("type")
 
-			return runFirewallUpdate(pinPath, ruleType, action, ipRange, port, protocol, ruleIndex, direction, typeExplicitlySet, interfaceName)
+			return runFirewallUpdate(pinPath, ruleType, action, ipRange, port, protocol, ruleIndex, direction, typeExplicitlySet)
 		},
 	}
 
@@ -250,7 +249,65 @@ Both XDP and TC modes support whitelist/blacklist rule types:
 	command.Flags().BoolVar(&xdp, "xdp", false, "Manage XDP rules (whitelist/blacklist)")
 	command.Flags().BoolVar(&ingress, "ingress", false, "Manage TC ingress (incoming) traffic rules")
 	command.Flags().BoolVar(&egress, "egress", false, "Manage TC egress (outgoing) traffic rules")
-	command.Flags().StringVarP(&interfaceName, "interface", "i", "eth0", "Network interface for TC program attachment (only used for TC rules)")
+
+	return command
+}
+
+// MakeFirewallRateLimit creates the firewall-ratelimit command
+func MakeFirewallRateLimit() *cobra.Command {
+	var (
+		pinPath    string
+		ppsLimit   uint64
+		bpsLimit   uint64
+		enable     bool
+		disable    bool
+		showStats  bool
+		resetStats bool
+		showConfig bool
+	)
+
+	command := &cobra.Command{
+		Use:   "firewall-ratelimit",
+		Short: "Manage XDP firewall rate limiting",
+		Long: `Manage rate limiting for XDP firewall to control network traffic rates.
+Rate limiting uses token bucket algorithm and supports:
+- Packets per second (pps) limiting
+- Bytes per second (bps) limiting
+
+Rate limiting is applied AFTER firewall rules are checked.`,
+		Example: `  # Enable rate limiting with 1000 packets/s and 1MB/s
+  bgo firewall-ratelimit --enable --pps 1000 --bps 1048576
+
+  # Enable only packet rate limiting (10000 packets/s)
+  bgo firewall-ratelimit --enable --pps 10000
+
+  # Enable only bandwidth limiting (10 MB/s)
+  bgo firewall-ratelimit --enable --bps 10485760
+
+  # Show current rate limit configuration
+  bgo firewall-ratelimit --show-config
+
+  # Show rate limiting statistics
+  bgo firewall-ratelimit --show-stats
+
+  # Reset rate limiting statistics
+  bgo firewall-ratelimit --reset-stats
+
+  # Disable rate limiting
+  bgo firewall-ratelimit --disable`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runFirewallRateLimit(pinPath, ppsLimit, bpsLimit, enable, disable, showStats, resetStats, showConfig)
+		},
+	}
+
+	command.Flags().StringVar(&pinPath, "pin-path", "/sys/fs/bpf/firewall", "BPF filesystem pin path")
+	command.Flags().Uint64Var(&ppsLimit, "pps", 0, "Packets per second limit (0 = no limit)")
+	command.Flags().Uint64Var(&bpsLimit, "bps", 0, "Bytes per second limit (0 = no limit)")
+	command.Flags().BoolVar(&enable, "enable", false, "Enable rate limiting")
+	command.Flags().BoolVar(&disable, "disable", false, "Disable rate limiting")
+	command.Flags().BoolVar(&showStats, "show-stats", false, "Show rate limiting statistics")
+	command.Flags().BoolVar(&resetStats, "reset-stats", false, "Reset rate limiting statistics")
+	command.Flags().BoolVar(&showConfig, "show-config", false, "Show current rate limit configuration")
 
 	return command
 }
@@ -444,12 +501,9 @@ type RuleResponse struct {
 }
 
 type StatsResponse struct {
-	TotalPackets    uint64 `json:"total_packets"`
-	AllowedPackets  uint64 `json:"allowed_packets"`
-	BlockedPackets  uint64 `json:"blocked_packets"`
-	LvsDnatPackets  uint64 `json:"lvs_dnat_packets"`
-	LvsSnatPackets  uint64 `json:"lvs_snat_packets"`
-	LvsTotalPackets uint64 `json:"lvs_total_packets"`
+	TotalPackets   uint64 `json:"total_packets"`
+	AllowedPackets uint64 `json:"allowed_packets"`
+	BlockedPackets uint64 `json:"blocked_packets"`
 }
 
 // TC Rule request/response structures
@@ -516,12 +570,9 @@ func (s *FirewallServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := StatsResponse{
-		TotalPackets:    stats.TotalPackets,
-		AllowedPackets:  stats.AllowedPackets,
-		BlockedPackets:  stats.BlockedPackets,
-		LvsDnatPackets:  stats.LvsDnatPackets,
-		LvsSnatPackets:  stats.LvsSnatPackets,
-		LvsTotalPackets: stats.LvsTotalPackets,
+		TotalPackets:   stats.TotalPackets,
+		AllowedPackets: stats.AllowedPackets,
+		BlockedPackets: stats.BlockedPackets,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -829,9 +880,9 @@ func (s *FirewallServer) removeTCRule(w http.ResponseWriter, r *http.Request, di
 }
 
 // runFirewallUpdate handles the firewall-update command
-func runFirewallUpdate(pinPath, ruleType, action, ipRange string, port uint16, protocol uint8, ruleIndex uint32, direction string, typeExplicitlySet bool, interfaceName string) error {
+func runFirewallUpdate(pinPath, ruleType, action, ipRange string, port uint16, protocol uint8, ruleIndex uint32, direction string, typeExplicitlySet bool) error {
 	if direction == "ingress" || direction == "egress" {
-		return runTCFirewallUpdate(pinPath, ruleType, direction, action, ipRange, port, protocol, ruleIndex, typeExplicitlySet, interfaceName)
+		return runTCFirewallUpdate(pinPath, ruleType, direction, action, ipRange, port, protocol, ruleIndex, typeExplicitlySet)
 	}
 
 	// Handle XDP-based rules (whitelist/blacklist)
@@ -1004,16 +1055,6 @@ func runFirewallUpdate(pinPath, ruleType, action, ipRange string, port uint16, p
 				fmt.Printf("Block Rate:      %.2f%%\n", float64(stats.BlockedPackets)/float64(stats.TotalPackets)*100)
 			}
 
-			// Display LVS statistics
-			fmt.Printf("\nLVS Statistics:\n")
-			fmt.Printf("LVS Total Packets: %d\n", stats.LvsTotalPackets)
-			fmt.Printf("DNAT Packets:      %d\n", stats.LvsDnatPackets)
-			fmt.Printf("SNAT Packets:      %d\n", stats.LvsSnatPackets)
-			if stats.LvsTotalPackets > 0 {
-				fmt.Printf("DNAT Rate:         %.2f%%\n", float64(stats.LvsDnatPackets)/float64(stats.LvsTotalPackets)*100)
-				fmt.Printf("SNAT Rate:         %.2f%%\n", float64(stats.LvsSnatPackets)/float64(stats.LvsTotalPackets)*100)
-			}
-
 		default:
 			return fmt.Errorf("invalid action: %s (must be add, remove, list, or stats)", action)
 		}
@@ -1025,20 +1066,14 @@ func runFirewallUpdate(pinPath, ruleType, action, ipRange string, port uint16, p
 }
 
 // runTCFirewallUpdate handles TC-based firewall rules with whitelist/blacklist support
-func runTCFirewallUpdate(pinPath, ruleType, direction, action, ipRange string, port uint16, protocol uint8, ruleIndex uint32, typeExplicitlySet bool, interfaceName string) error {
+func runTCFirewallUpdate(pinPath, ruleType, direction, action, ipRange string, port uint16, protocol uint8, ruleIndex uint32, typeExplicitlySet bool) error {
 	fmt.Printf("Managing TC %s rules\n", direction)
 
-	// Create TC manager with interface support
-	tcManager := firewall.NewTCFirewallManagerWithInterface(interfaceName, pinPath)
+	// Create TC manager (it will use pinned maps)
+	tcManager := firewall.NewTCFirewallManager(pinPath)
 
-	// Check if TC programs are attached
-	attached, err := tcManager.IsAttached()
-	if err != nil {
-		fmt.Printf("Warning: Cannot check TC attachment status: %v\n", err)
-	} else if !attached {
-		fmt.Printf("Warning: TC firewall programs are not attached to interface %s\n", interfaceName)
-		return fmt.Errorf("TC programs are not attached to interface %s", interfaceName)
-	}
+	// Note: TC programs should already be attached by firewall-server
+	// We're just updating rules via pinned maps, so we don't need to check attachment
 
 	switch action {
 	case "add":
@@ -1398,6 +1433,124 @@ func runCleanupMaps(pinPath string, force bool) error {
 		fmt.Printf("Successfully removed %d BPF maps\n", removedCount)
 		fmt.Printf("You can now restart the firewall to recreate maps with new specifications\n")
 	}
+
+	return nil
+}
+
+// runFirewallRateLimit handles the firewall-ratelimit command
+func runFirewallRateLimit(pinPath string, ppsLimit, bpsLimit uint64, enable, disable, showStats, resetStats, showConfig bool) error {
+	fwManager := firewall.NewFirewallManager(pinPath)
+
+	// Show configuration
+	if showConfig {
+		config, err := fwManager.GetRateLimit()
+		if err != nil {
+			return fmt.Errorf("failed to get rate limit config: %v", err)
+		}
+
+		fmt.Printf("Rate Limit Configuration:\n")
+		fmt.Printf("  Status:           %s\n", func() string {
+			if config.Enabled == 1 {
+				return "Enabled"
+			}
+			return "Disabled"
+		}())
+		fmt.Printf("  Packets/sec:      %d pps", config.PpsLimit)
+		if config.PpsLimit > 0 {
+			fmt.Printf(" (%.2f Kpps)", float64(config.PpsLimit)/1000.0)
+		}
+		fmt.Println()
+		fmt.Printf("  Bytes/sec:        %d bytes", config.BpsLimit)
+		if config.BpsLimit > 0 {
+			fmt.Printf(" (%.2f MB/s)", float64(config.BpsLimit)/1048576.0)
+		}
+		fmt.Println()
+		return nil
+	}
+
+	// Show statistics
+	if showStats {
+		stats, err := fwManager.GetRateLimitStats()
+		if err != nil {
+			return fmt.Errorf("failed to get rate limit stats: %v", err)
+		}
+
+		fmt.Printf("Rate Limit Statistics:\n")
+		fmt.Printf("  Passed Packets:   %d\n", stats.PassedPackets)
+		fmt.Printf("  Passed Bytes:     %d (%.2f MB)\n", stats.PassedBytes, float64(stats.PassedBytes)/1048576.0)
+		fmt.Printf("  Dropped Packets:  %d\n", stats.DroppedPackets)
+		fmt.Printf("  Dropped Bytes:    %d (%.2f MB)\n", stats.DroppedBytes, float64(stats.DroppedBytes)/1048576.0)
+
+		totalPackets := stats.PassedPackets + stats.DroppedPackets
+		if totalPackets > 0 {
+			dropRate := float64(stats.DroppedPackets) / float64(totalPackets) * 100
+			fmt.Printf("  Drop Rate:        %.2f%%\n", dropRate)
+		}
+		return nil
+	}
+
+	// Reset statistics
+	if resetStats {
+		if err := fwManager.ResetRateLimitStats(); err != nil {
+			return fmt.Errorf("failed to reset rate limit stats: %v", err)
+		}
+		fmt.Println("Rate limit statistics reset successfully")
+		return nil
+	}
+
+	// Enable rate limiting
+	if enable {
+		if ppsLimit == 0 && bpsLimit == 0 {
+			return fmt.Errorf("at least one of --pps or --bps must be specified when enabling rate limiting")
+		}
+
+		if err := fwManager.SetRateLimit(ppsLimit, bpsLimit, true); err != nil {
+			return fmt.Errorf("failed to enable rate limiting: %v", err)
+		}
+
+		fmt.Printf("Rate limiting enabled:\n")
+		if ppsLimit > 0 {
+			fmt.Printf("  Packets/sec: %d pps (%.2f Kpps)\n", ppsLimit, float64(ppsLimit)/1000.0)
+		}
+		if bpsLimit > 0 {
+			fmt.Printf("  Bytes/sec:   %d bytes (%.2f MB/s)\n", bpsLimit, float64(bpsLimit)/1048576.0)
+		}
+		return nil
+	}
+
+	// Disable rate limiting
+	if disable {
+		if err := fwManager.SetRateLimit(0, 0, false); err != nil {
+			return fmt.Errorf("failed to disable rate limiting: %v", err)
+		}
+		fmt.Println("Rate limiting disabled")
+		return nil
+	}
+
+	// If no action specified, show current configuration
+	config, err := fwManager.GetRateLimit()
+	if err != nil {
+		return fmt.Errorf("failed to get rate limit config: %v", err)
+	}
+
+	fmt.Printf("Rate Limit Configuration:\n")
+	fmt.Printf("  Status:        %s\n", func() string {
+		if config.Enabled == 1 {
+			return "Enabled"
+		}
+		return "Disabled"
+	}())
+	fmt.Printf("  Packets/sec:   %d pps", config.PpsLimit)
+	if config.PpsLimit > 0 {
+		fmt.Printf(" (%.2f Kpps)", float64(config.PpsLimit)/1000.0)
+	}
+	fmt.Println()
+	fmt.Printf("  Bytes/sec:     %d bytes", config.BpsLimit)
+	if config.BpsLimit > 0 {
+		fmt.Printf(" (%.2f MB/s)", float64(config.BpsLimit)/1048576.0)
+	}
+	fmt.Println()
+	fmt.Println("\nUse --show-stats to view statistics, --enable/--disable to change state")
 
 	return nil
 }

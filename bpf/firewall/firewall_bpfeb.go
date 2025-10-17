@@ -13,39 +13,6 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type firewallBackendServer struct {
-	_       structs.HostLayout
-	Ip      uint32
-	Port    uint16
-	Weight  uint8
-	Enabled uint8
-}
-
-type firewallConnTrack struct {
-	_                structs.HostLayout
-	ClientIp         uint32
-	ClientPort       uint16
-	Pad1             uint16
-	OriginalDestIp   uint32
-	OriginalDestPort uint16
-	Pad2             uint16
-	TargetIp         uint32
-	TargetPort       uint16
-	Pad3             uint16
-	Timestamp        uint64
-}
-
-type firewallDnatRule struct {
-	_            structs.HostLayout
-	OriginalIp   uint32
-	OriginalPort uint16
-	Pad1         uint16
-	TargetIp     uint32
-	TargetPort   uint16
-	Protocol     uint8
-	Enabled      uint8
-}
-
 type firewallFwRule struct {
 	_        structs.HostLayout
 	IpStart  uint32
@@ -56,24 +23,33 @@ type firewallFwRule struct {
 }
 
 type firewallFwStats struct {
-	_               structs.HostLayout
-	TotalPackets    uint64
-	AllowedPackets  uint64
-	BlockedPackets  uint64
-	LvsDnatPackets  uint64
-	LvsSnatPackets  uint64
-	LvsTotalPackets uint64
+	_              structs.HostLayout
+	TotalPackets   uint64
+	AllowedPackets uint64
+	BlockedPackets uint64
 }
 
-type firewallServiceConfig struct {
-	_            structs.HostLayout
-	Vip          uint32
-	Vport        uint16
-	Protocol     uint8
-	Scheduler    uint8
-	BackendCount uint32
-	Enabled      uint8
-	Padding      [3]uint8
+type firewallRateLimitConfig struct {
+	_        structs.HostLayout
+	PpsLimit uint64
+	BpsLimit uint64
+	Enabled  uint8
+	Padding  [7]uint8
+}
+
+type firewallRateLimitState struct {
+	_             structs.HostLayout
+	LastUpdateNs  uint64
+	TokensPackets uint64
+	TokensBytes   uint64
+}
+
+type firewallRateLimitStats struct {
+	_              structs.HostLayout
+	DroppedPackets uint64
+	DroppedBytes   uint64
+	PassedPackets  uint64
+	PassedBytes    uint64
 }
 
 // loadFirewall returns the embedded CollectionSpec for firewall.
@@ -125,16 +101,13 @@ type firewallProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type firewallMapSpecs struct {
-	BackendMap    *ebpf.MapSpec `ebpf:"backend_map"`
-	BlacklistMap  *ebpf.MapSpec `ebpf:"blacklist_map"`
-	ConfigMap     *ebpf.MapSpec `ebpf:"config_map"`
-	ConnTrackMap  *ebpf.MapSpec `ebpf:"conn_track_map"`
-	DebugCounters *ebpf.MapSpec `ebpf:"debug_counters"`
-	DebugMap      *ebpf.MapSpec `ebpf:"debug_map"`
-	LvsDnatMap    *ebpf.MapSpec `ebpf:"lvs_dnat_map"`
-	ServiceMap    *ebpf.MapSpec `ebpf:"service_map"`
-	StatsMap      *ebpf.MapSpec `ebpf:"stats_map"`
-	WhitelistMap  *ebpf.MapSpec `ebpf:"whitelist_map"`
+	BlacklistMap       *ebpf.MapSpec `ebpf:"blacklist_map"`
+	ConfigMap          *ebpf.MapSpec `ebpf:"config_map"`
+	RateLimitConfigMap *ebpf.MapSpec `ebpf:"rate_limit_config_map"`
+	RateLimitStateMap  *ebpf.MapSpec `ebpf:"rate_limit_state_map"`
+	RateLimitStatsMap  *ebpf.MapSpec `ebpf:"rate_limit_stats_map"`
+	StatsMap           *ebpf.MapSpec `ebpf:"stats_map"`
+	WhitelistMap       *ebpf.MapSpec `ebpf:"whitelist_map"`
 }
 
 // firewallVariableSpecs contains global variables before they are loaded into the kernel.
@@ -163,28 +136,22 @@ func (o *firewallObjects) Close() error {
 //
 // It can be passed to loadFirewallObjects or ebpf.CollectionSpec.LoadAndAssign.
 type firewallMaps struct {
-	BackendMap    *ebpf.Map `ebpf:"backend_map"`
-	BlacklistMap  *ebpf.Map `ebpf:"blacklist_map"`
-	ConfigMap     *ebpf.Map `ebpf:"config_map"`
-	ConnTrackMap  *ebpf.Map `ebpf:"conn_track_map"`
-	DebugCounters *ebpf.Map `ebpf:"debug_counters"`
-	DebugMap      *ebpf.Map `ebpf:"debug_map"`
-	LvsDnatMap    *ebpf.Map `ebpf:"lvs_dnat_map"`
-	ServiceMap    *ebpf.Map `ebpf:"service_map"`
-	StatsMap      *ebpf.Map `ebpf:"stats_map"`
-	WhitelistMap  *ebpf.Map `ebpf:"whitelist_map"`
+	BlacklistMap       *ebpf.Map `ebpf:"blacklist_map"`
+	ConfigMap          *ebpf.Map `ebpf:"config_map"`
+	RateLimitConfigMap *ebpf.Map `ebpf:"rate_limit_config_map"`
+	RateLimitStateMap  *ebpf.Map `ebpf:"rate_limit_state_map"`
+	RateLimitStatsMap  *ebpf.Map `ebpf:"rate_limit_stats_map"`
+	StatsMap           *ebpf.Map `ebpf:"stats_map"`
+	WhitelistMap       *ebpf.Map `ebpf:"whitelist_map"`
 }
 
 func (m *firewallMaps) Close() error {
 	return _FirewallClose(
-		m.BackendMap,
 		m.BlacklistMap,
 		m.ConfigMap,
-		m.ConnTrackMap,
-		m.DebugCounters,
-		m.DebugMap,
-		m.LvsDnatMap,
-		m.ServiceMap,
+		m.RateLimitConfigMap,
+		m.RateLimitStateMap,
+		m.RateLimitStatsMap,
 		m.StatsMap,
 		m.WhitelistMap,
 	)

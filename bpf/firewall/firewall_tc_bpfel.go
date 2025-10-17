@@ -13,6 +13,31 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type firewall_tcConnTrack struct {
+	_                structs.HostLayout
+	ClientIp         uint32
+	ClientPort       uint16
+	Pad1             uint16
+	OriginalDestIp   uint32
+	OriginalDestPort uint16
+	Pad2             uint16
+	TargetIp         uint32
+	TargetPort       uint16
+	Pad3             uint16
+	Timestamp        uint64
+}
+
+type firewall_tcDnatRule struct {
+	_            structs.HostLayout
+	OriginalIp   uint32
+	OriginalPort uint16
+	Pad1         uint16
+	TargetIp     uint32
+	TargetPort   uint16
+	Protocol     uint8
+	Enabled      uint8
+}
+
 type firewall_tcFirewallTcStats struct {
 	_              structs.HostLayout
 	TotalPackets   uint64
@@ -84,6 +109,11 @@ type firewall_tcProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type firewall_tcMapSpecs struct {
+	ConnReverseMap          *ebpf.MapSpec `ebpf:"conn_reverse_map"`
+	ConnTrackMap            *ebpf.MapSpec `ebpf:"conn_track_map"`
+	DebugCounters           *ebpf.MapSpec `ebpf:"debug_counters"`
+	DebugMap                *ebpf.MapSpec `ebpf:"debug_map"`
+	LvsDnatMap              *ebpf.MapSpec `ebpf:"lvs_dnat_map"`
 	TcEgressBlacklist       *ebpf.MapSpec `ebpf:"tc_egress_blacklist"`
 	TcEgressBlacklistCount  *ebpf.MapSpec `ebpf:"tc_egress_blacklist_count"`
 	TcEgressWhitelist       *ebpf.MapSpec `ebpf:"tc_egress_whitelist"`
@@ -121,6 +151,11 @@ func (o *firewall_tcObjects) Close() error {
 //
 // It can be passed to loadFirewall_tcObjects or ebpf.CollectionSpec.LoadAndAssign.
 type firewall_tcMaps struct {
+	ConnReverseMap          *ebpf.Map `ebpf:"conn_reverse_map"`
+	ConnTrackMap            *ebpf.Map `ebpf:"conn_track_map"`
+	DebugCounters           *ebpf.Map `ebpf:"debug_counters"`
+	DebugMap                *ebpf.Map `ebpf:"debug_map"`
+	LvsDnatMap              *ebpf.Map `ebpf:"lvs_dnat_map"`
 	TcEgressBlacklist       *ebpf.Map `ebpf:"tc_egress_blacklist"`
 	TcEgressBlacklistCount  *ebpf.Map `ebpf:"tc_egress_blacklist_count"`
 	TcEgressWhitelist       *ebpf.Map `ebpf:"tc_egress_whitelist"`
@@ -134,6 +169,11 @@ type firewall_tcMaps struct {
 
 func (m *firewall_tcMaps) Close() error {
 	return _Firewall_tcClose(
+		m.ConnReverseMap,
+		m.ConnTrackMap,
+		m.DebugCounters,
+		m.DebugMap,
+		m.LvsDnatMap,
 		m.TcEgressBlacklist,
 		m.TcEgressBlacklistCount,
 		m.TcEgressWhitelist,

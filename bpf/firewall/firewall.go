@@ -68,12 +68,9 @@ type Rule struct {
 
 // Stats represents firewall statistics
 type Stats struct {
-	TotalPackets    uint64 `json:"total_packets"`
-	AllowedPackets  uint64 `json:"allowed_packets"`
-	BlockedPackets  uint64 `json:"blocked_packets"`
-	LvsDnatPackets  uint64 `json:"lvs_dnat_packets"`
-	LvsSnatPackets  uint64 `json:"lvs_snat_packets"`
-	LvsTotalPackets uint64 `json:"lvs_total_packets"`
+	TotalPackets   uint64 `json:"total_packets"`
+	AllowedPackets uint64 `json:"allowed_packets"`
+	BlockedPackets uint64 `json:"blocked_packets"`
 }
 
 // TCRule represents a TC firewall rule with whitelist/blacklist support
@@ -94,6 +91,21 @@ type TCStats struct {
 	DeniedPackets  uint64 `json:"denied_packets"`
 	IngressPackets uint64 `json:"ingress_packets"`
 	EgressPackets  uint64 `json:"egress_packets"`
+}
+
+// RateLimitConfig represents rate limiting configuration
+type RateLimitConfig struct {
+	PpsLimit uint64 `json:"pps_limit"` // Packets per second limit
+	BpsLimit uint64 `json:"bps_limit"` // Bytes per second limit
+	Enabled  uint8  `json:"enabled"`   // 1=enabled, 0=disabled
+}
+
+// RateLimitStats represents rate limiting statistics
+type RateLimitStats struct {
+	DroppedPackets uint64 `json:"dropped_packets"` // Packets dropped due to rate limit
+	DroppedBytes   uint64 `json:"dropped_bytes"`   // Bytes dropped due to rate limit
+	PassedPackets  uint64 `json:"passed_packets"`  // Packets passed rate limit check
+	PassedBytes    uint64 `json:"passed_bytes"`    // Bytes passed rate limit check
 }
 
 // XDPFirewall manages XDP firewall functionality
@@ -401,12 +413,9 @@ func (fw *XDPFirewall) GetStats() (*Stats, error) {
 	}
 
 	return &Stats{
-		TotalPackets:    bpfStats.TotalPackets,
-		AllowedPackets:  bpfStats.AllowedPackets,
-		BlockedPackets:  bpfStats.BlockedPackets,
-		LvsDnatPackets:  bpfStats.LvsDnatPackets,
-		LvsSnatPackets:  bpfStats.LvsSnatPackets,
-		LvsTotalPackets: bpfStats.LvsTotalPackets,
+		TotalPackets:   bpfStats.TotalPackets,
+		AllowedPackets: bpfStats.AllowedPackets,
+		BlockedPackets: bpfStats.BlockedPackets,
 	}, nil
 }
 
@@ -422,7 +431,10 @@ func (fw *XDPFirewall) GetConfig(key uint32) (uint32, error) {
 	return value, err
 }
 
-// IPToUint32 converts IP address to uint32 (network byte order)
+// IPToUint32 converts IP address to uint32
+// Note: On little-endian systems, BPF programs read ip->saddr/daddr directly as uint32,
+// which results in little-endian interpretation of the network byte order bytes.
+// So we need to store IPs in little-endian format to match BPF's interpretation.
 func IPToUint32(ip net.IP) uint32 {
 	if ip == nil {
 		return 0
@@ -434,7 +446,7 @@ func IPToUint32(ip net.IP) uint32 {
 	return binary.LittleEndian.Uint32(ip)
 }
 
-// Uint32ToIP converts uint32 to IP address (network byte order)
+// Uint32ToIP converts uint32 to IP address
 func Uint32ToIP(val uint32) net.IP {
 	ip := make(net.IP, 4)
 	binary.LittleEndian.PutUint32(ip, val)
@@ -619,13 +631,153 @@ func (fm *FirewallManager) GetStats() (*Stats, error) {
 	}
 
 	return &Stats{
-		TotalPackets:    bpfStats.TotalPackets,
-		AllowedPackets:  bpfStats.AllowedPackets,
-		BlockedPackets:  bpfStats.BlockedPackets,
-		LvsDnatPackets:  bpfStats.LvsDnatPackets,
-		LvsSnatPackets:  bpfStats.LvsSnatPackets,
-		LvsTotalPackets: bpfStats.LvsTotalPackets,
+		TotalPackets:   bpfStats.TotalPackets,
+		AllowedPackets: bpfStats.AllowedPackets,
+		BlockedPackets: bpfStats.BlockedPackets,
 	}, nil
+}
+
+// SetRateLimit sets the rate limiting configuration
+func (fm *FirewallManager) SetRateLimit(ppsLimit, bpsLimit uint64, enabled bool) error {
+	mapPath := fmt.Sprintf("%s/rate_limit_config_map", fm.pinPath)
+	m, err := ebpf.LoadPinnedMap(mapPath, nil)
+	if err != nil {
+		return fmt.Errorf("failed to load pinned rate limit config map: %w", err)
+	}
+	defer m.Close()
+
+	enabledVal := uint8(0)
+	if enabled {
+		enabledVal = 1
+	}
+
+	// BPF structure: struct rate_limit_config
+	// We need to match the exact layout with padding
+	type rateLimitConfig struct {
+		PpsLimit uint64
+		BpsLimit uint64
+		Enabled  uint8
+		Padding  [7]byte
+	}
+
+	config := rateLimitConfig{
+		PpsLimit: ppsLimit,
+		BpsLimit: bpsLimit,
+		Enabled:  enabledVal,
+	}
+
+	if err := m.Put(uint32(0), config); err != nil {
+		return fmt.Errorf("failed to set rate limit config: %w", err)
+	}
+
+	// Initialize state map if enabling for the first time
+	if enabled {
+		stateMapPath := fmt.Sprintf("%s/rate_limit_state_map", fm.pinPath)
+		stateMap, err := ebpf.LoadPinnedMap(stateMapPath, nil)
+		if err != nil {
+			return fmt.Errorf("failed to load pinned rate limit state map: %w", err)
+		}
+		defer stateMap.Close()
+
+		type rateLimitState struct {
+			LastUpdateNs  uint64
+			TokensPackets uint64
+			TokensBytes   uint64
+		}
+
+		state := rateLimitState{
+			LastUpdateNs:  0,
+			TokensPackets: ppsLimit, // Initialize with full bucket
+			TokensBytes:   bpsLimit, // Initialize with full bucket
+		}
+
+		if err := stateMap.Put(uint32(0), state); err != nil {
+			return fmt.Errorf("failed to initialize rate limit state: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// GetRateLimit gets the current rate limiting configuration
+func (fm *FirewallManager) GetRateLimit() (*RateLimitConfig, error) {
+	mapPath := fmt.Sprintf("%s/rate_limit_config_map", fm.pinPath)
+	m, err := ebpf.LoadPinnedMap(mapPath, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load pinned rate limit config map: %w", err)
+	}
+	defer m.Close()
+
+	type rateLimitConfig struct {
+		PpsLimit uint64
+		BpsLimit uint64
+		Enabled  uint8
+		Padding  [7]byte
+	}
+
+	var config rateLimitConfig
+	if err := m.Lookup(uint32(0), &config); err != nil {
+		return nil, fmt.Errorf("failed to get rate limit config: %w", err)
+	}
+
+	return &RateLimitConfig{
+		PpsLimit: config.PpsLimit,
+		BpsLimit: config.BpsLimit,
+		Enabled:  config.Enabled,
+	}, nil
+}
+
+// GetRateLimitStats returns current rate limiting statistics
+func (fm *FirewallManager) GetRateLimitStats() (*RateLimitStats, error) {
+	mapPath := fmt.Sprintf("%s/rate_limit_stats_map", fm.pinPath)
+	m, err := ebpf.LoadPinnedMap(mapPath, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load pinned rate limit stats map: %w", err)
+	}
+	defer m.Close()
+
+	type rateLimitStats struct {
+		DroppedPackets uint64
+		DroppedBytes   uint64
+		PassedPackets  uint64
+		PassedBytes    uint64
+	}
+
+	var stats rateLimitStats
+	if err := m.Lookup(uint32(0), &stats); err != nil {
+		return nil, fmt.Errorf("failed to get rate limit stats: %w", err)
+	}
+
+	return &RateLimitStats{
+		DroppedPackets: stats.DroppedPackets,
+		DroppedBytes:   stats.DroppedBytes,
+		PassedPackets:  stats.PassedPackets,
+		PassedBytes:    stats.PassedBytes,
+	}, nil
+}
+
+// ResetRateLimitStats resets the rate limiting statistics
+func (fm *FirewallManager) ResetRateLimitStats() error {
+	mapPath := fmt.Sprintf("%s/rate_limit_stats_map", fm.pinPath)
+	m, err := ebpf.LoadPinnedMap(mapPath, nil)
+	if err != nil {
+		return fmt.Errorf("failed to load pinned rate limit stats map: %w", err)
+	}
+	defer m.Close()
+
+	type rateLimitStats struct {
+		DroppedPackets uint64
+		DroppedBytes   uint64
+		PassedPackets  uint64
+		PassedBytes    uint64
+	}
+
+	stats := rateLimitStats{}
+	if err := m.Put(uint32(0), stats); err != nil {
+		return fmt.Errorf("failed to reset rate limit stats: %w", err)
+	}
+
+	return nil
 }
 
 // Server provides HTTP API for firewall management
@@ -1459,4 +1611,66 @@ func (m *TCFirewallManager) SetInterface(iface string) {
 // GetInterface returns the current interface name
 func (m *TCFirewallManager) GetInterface() string {
 	return m.iface
+}
+
+// ============ TC Firewall Object Loader (Export for external use) ============
+
+// LoadFirewall_tc loads the TC firewall BPF objects
+func LoadFirewall_tc(opts *ebpf.CollectionOptions) (*firewall_tcObjects, error) {
+	objs := &firewall_tcObjects{}
+	if err := loadFirewall_tcObjects(objs, opts); err != nil {
+		return nil, err
+	}
+	return objs, nil
+}
+
+// TCObjects provides access to loaded TC firewall programs and maps
+type TCObjects struct {
+	objs *firewall_tcObjects
+}
+
+// Close closes all resources
+func (o *TCObjects) Close() error {
+	if o.objs != nil {
+		return o.objs.Close()
+	}
+	return nil
+}
+
+// TcIngressFilter returns the ingress filter program
+func (o *TCObjects) TcIngressFilter() *ebpf.Program {
+	return o.objs.TcIngressFilter
+}
+
+// TcEgressFilter returns the egress filter program
+func (o *TCObjects) TcEgressFilter() *ebpf.Program {
+	return o.objs.TcEgressFilter
+}
+
+// NewTCObjects loads TC firewall BPF objects with pinning support
+func NewTCObjects(pinPath string) (*TCObjects, error) {
+	// Remove memory limit for eBPF
+	if err := rlimit.RemoveMemlock(); err != nil {
+		return nil, fmt.Errorf("failed to remove memory limit: %w", err)
+	}
+
+	// Create pin directory if specified
+	if pinPath != "" {
+		if err := os.MkdirAll(pinPath, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create pin directory %s: %w", pinPath, err)
+		}
+	}
+
+	opts := &ebpf.CollectionOptions{
+		Maps: ebpf.MapOptions{
+			PinPath: pinPath,
+		},
+	}
+
+	objs, err := LoadFirewall_tc(opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load TC firewall objects: %w", err)
+	}
+
+	return &TCObjects{objs: objs}, nil
 }

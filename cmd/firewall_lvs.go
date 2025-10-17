@@ -24,15 +24,22 @@ var (
 	rport    int
 	protocol string
 	enabled  bool
-	weight   int
 )
 
 // firewallLvsCmd represents the firewall-lvs command
 var firewallLvsCmd = &cobra.Command{
 	Use:   "firewall-lvs",
-	Short: "Manage LVS NAT mode configuration",
-	Long: `Manage Load Balancer (LVS) NAT mode configuration for the firewall.
-This command allows you to add, remove, list and manage DNAT rules.`,
+	Short: "Manage TC-based LVS load balancer rules",
+	Long: `Manage TC (Traffic Control) based LVS (Load Balancer Virtual Server) rules.
+
+This command allows you to:
+- Add, remove, and list DNAT rules
+- Enable/disable LVS functionality
+- Monitor connection tracking and statistics
+- Debug LVS processing
+
+Note: The TC programs must be loaded first by the firewall-server daemon.
+The TC implementation provides full L4 load balancing with DNAT/SNAT support.`,
 }
 
 // addDnatCmd represents the add dnat command
@@ -110,8 +117,6 @@ var debugLvsCmd = &cobra.Command{
 }
 
 func init() {
-	RootCmd.AddCommand(firewallLvsCmd)
-
 	// Add subcommands
 	firewallLvsCmd.AddCommand(addDnatCmd)
 	firewallLvsCmd.AddCommand(removeDnatCmd)
@@ -305,7 +310,7 @@ func runAddDnat(cmd *cobra.Command, args []string) error {
 		}
 
 		// Check if this is the same rule (VIP:VPORT:PROTOCOL)
-		if existingRule.OriginalIP == binary.BigEndian.Uint32(vipAddr.To4()) &&
+		if existingRule.OriginalIP == binary.LittleEndian.Uint32(vipAddr.To4()) &&
 			existingRule.OriginalPort == uint16(vport) &&
 			existingRule.Protocol == proto {
 			ruleIndex = i
@@ -333,11 +338,13 @@ func runAddDnat(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create new rule
+	// 注意：BPF 程序中从 iphdr 读取的 IP 地址在 x86 架构上是小端序
+	// 所以我们在 Go 中也使用小端序存储
 	rule := DnatRule{
-		OriginalIP:   binary.BigEndian.Uint32(vipAddr.To4()), // IP 地址使用网络字节序
-		OriginalPort: uint16(vport),                          // 端口使用主机字节序
-		TargetIP:     binary.BigEndian.Uint32(ripAddr.To4()), // IP 地址使用网络字节序
-		TargetPort:   uint16(rport),                          // 端口使用主机字节序
+		OriginalIP:   binary.LittleEndian.Uint32(vipAddr.To4()),
+		OriginalPort: uint16(vport),
+		TargetIP:     binary.LittleEndian.Uint32(ripAddr.To4()),
+		TargetPort:   uint16(rport),
 		Protocol:     proto,
 		Enabled:      1,
 	}
@@ -397,7 +404,7 @@ func runRemoveDnat(cmd *cobra.Command, args []string) error {
 		}
 
 		// Check if this is the rule to remove
-		if existingRule.OriginalIP == binary.BigEndian.Uint32(vipAddr.To4()) &&
+		if existingRule.OriginalIP == binary.LittleEndian.Uint32(vipAddr.To4()) &&
 			existingRule.OriginalPort == uint16(vport) &&
 			existingRule.Protocol == proto {
 
@@ -445,11 +452,11 @@ func runListDnat(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Convert IPs back to readable format
+		// Convert IPs back to readable format (使用小端序)
 		vipBytes := make([]byte, 4)
 		ripBytes := make([]byte, 4)
-		binary.BigEndian.PutUint32(vipBytes, rule.OriginalIP)
-		binary.BigEndian.PutUint32(ripBytes, rule.TargetIP)
+		binary.LittleEndian.PutUint32(vipBytes, rule.OriginalIP)
+		binary.LittleEndian.PutUint32(ripBytes, rule.TargetIP)
 
 		vipStr := net.IP(vipBytes).String()
 		ripStr := net.IP(ripBytes).String()
@@ -599,21 +606,20 @@ func runLvsCleanup(cmd *cobra.Command, args []string) error {
 }
 
 func runLvsStats(cmd *cobra.Command, args []string) error {
-	// Load the pinned stats map
-	m, err := ebpf.LoadPinnedMap(firewall.PinPath+"/stats_map", &ebpf.LoadPinOptions{})
+	// Load the pinned TC stats map
+	m, err := ebpf.LoadPinnedMap(firewall.PinPath+"/tc_stats_map", &ebpf.LoadPinOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to load stats_map: %v", err)
+		return fmt.Errorf("failed to load tc_stats_map: %v", err)
 	}
 	defer m.Close()
 
-	// Get statistics
+	// Get statistics - must match struct firewall_tc_stats in firewall_tc.c
 	var stats struct {
-		TotalPackets    uint64
-		AllowedPackets  uint64
-		BlockedPackets  uint64
-		LvsDnatPackets  uint64
-		LvsSnatPackets  uint64
-		LvsTotalPackets uint64
+		TotalPackets   uint64
+		AllowedPackets uint64
+		DeniedPackets  uint64
+		IngressPackets uint64
+		EgressPackets  uint64
 	}
 
 	err = m.Lookup(uint32(0), &stats)
@@ -621,64 +627,24 @@ func runLvsStats(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get statistics: %v", err)
 	}
 
-	fmt.Printf("=== LVS NAT Statistics ===\n")
-	fmt.Printf("LVS Total Packets: %d\n", stats.LvsTotalPackets)
-	fmt.Printf("DNAT Packets:      %d\n", stats.LvsDnatPackets)
-	fmt.Printf("SNAT Packets:      %d\n", stats.LvsSnatPackets)
-
-	if stats.LvsTotalPackets > 0 {
-		fmt.Printf("DNAT Rate:         %.2f%%\n", float64(stats.LvsDnatPackets)/float64(stats.LvsTotalPackets)*100)
-		fmt.Printf("SNAT Rate:         %.2f%%\n", float64(stats.LvsSnatPackets)/float64(stats.LvsTotalPackets)*100)
-	}
-
-	fmt.Printf("\n=== Overall Firewall Statistics ===\n")
+	fmt.Printf("=== TC Firewall Statistics ===\n")
+	fmt.Printf("Time: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
 	fmt.Printf("Total Packets:     %d\n", stats.TotalPackets)
 	fmt.Printf("Allowed Packets:   %d\n", stats.AllowedPackets)
-	fmt.Printf("Blocked Packets:   %d\n", stats.BlockedPackets)
+	fmt.Printf("Denied Packets:    %d\n", stats.DeniedPackets)
+	fmt.Printf("Ingress Packets:   %d\n", stats.IngressPackets)
+	fmt.Printf("Egress Packets:    %d\n", stats.EgressPackets)
 
 	if stats.TotalPackets > 0 {
-		fmt.Printf("Allow Rate:        %.2f%%\n", float64(stats.AllowedPackets)/float64(stats.TotalPackets)*100)
-		fmt.Printf("Block Rate:        %.2f%%\n", float64(stats.BlockedPackets)/float64(stats.TotalPackets)*100)
-
-		if stats.LvsTotalPackets > 0 {
-			fmt.Printf("LVS Processing Rate: %.2f%%\n", float64(stats.LvsTotalPackets)/float64(stats.TotalPackets)*100)
-		}
+		fmt.Printf("\nAllow Rate:        %.2f%%\n", float64(stats.AllowedPackets)/float64(stats.TotalPackets)*100)
+		fmt.Printf("Deny Rate:         %.2f%%\n", float64(stats.DeniedPackets)/float64(stats.TotalPackets)*100)
+		fmt.Printf("Ingress Rate:      %.2f%%\n", float64(stats.IngressPackets)/float64(stats.TotalPackets)*100)
+		fmt.Printf("Egress Rate:       %.2f%%\n", float64(stats.EgressPackets)/float64(stats.TotalPackets)*100)
 	}
+
+	fmt.Printf("\n=== LVS Statistics (use 'debug' command for detailed counters) ===\n")
 
 	return nil
-}
-
-// Helper functions for debug command
-func getProtocolName(proto uint8) string {
-	switch proto {
-	case 1:
-		return "ICMP"
-	case 6:
-		return "TCP"
-	case 17:
-		return "UDP"
-	default:
-		return fmt.Sprintf("协议%d", proto)
-	}
-}
-
-func getStageName(stage uint8) string {
-	switch stage {
-	case 0:
-		return "LVS入口"
-	case 1:
-		return "DNAT查找"
-	case 2:
-		return "DNAT匹配"
-	case 3:
-		return "SNAT查找"
-	case 4:
-		return "SNAT匹配"
-	case 99:
-		return "LVS结果"
-	default:
-		return fmt.Sprintf("阶段%d", stage)
-	}
 }
 
 func runLvsDebug(cmd *cobra.Command, args []string) error {

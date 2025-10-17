@@ -28,6 +28,22 @@
 - 📦 **统一接口**: 所有功能通过统一的命令行工具访问
 - 🌐 **API 集成**: 防火墙功能提供完整的 REST API 支持
 
+## 文档
+
+### 快速上手
+- 📘 [防火墙使用指南](docs/FIREWALL_USAGE.md) - 完整的功能使用说明
+- 📋 [防火墙命令速查表](docs/FIREWALL_CHEATSHEET.md) - 常用命令快速参考
+
+### 详细文档
+- 🔥 [流量限制功能](docs/RATELIMIT.md) - Rate Limiting 详细说明
+- ⚡ [流量限制快速入门](docs/RATELIMIT_QUICKSTART.md) - Rate Limiting 快速开始
+- 🌐 [IP 范围支持](docs/IP_RANGE_SUPPORT.md) - CIDR 和 IP 段使用
+- 🔧 [LVS NAT 配置指南](bpf/firewall/LVS_NAT_GUIDE.md) - 负载均衡配置
+
+### 架构说明
+- 🏗️ [Rate Limit Pin 管理](docs/RATELIMIT_PIN_MANAGEMENT.md) - Pin 机制说明
+- 🔄 [Interface 参数移除](docs/INTERFACE_PARAM_REMOVAL.md) - 架构优化说明
+
 ## 快速开始
 
 ### 构建项目
@@ -63,7 +79,17 @@ sudo ./bin/bgo bashreadline
 sudo ./bin/bgo biosnoop
 
 # 启动防火墙服务器
-sudo ./bin/bgo firewall-server --interface eth0
+sudo ./bin/bgo firewall-server start --interface enp0s9
+
+# 启用 LVS 功能
+sudo ./bin/bgo firewall-lvs enable
+
+# 添加防火墙规则
+sudo ./bin/bgo firewall-lvs add-dnat --vip 192.168.63.100 --vport 80 --rip 192.168.63.20 --rport 8080 --protocol tcp
+# 网卡添加ip地址
+sudo ip addr add 192.168.63.100/24 dev enp0s8
+# 删除ip: sudo ip addr del 192.168.63.100/24 dev enp0s8
+
 ```
 
 > **注意**: 大部分功能需要 root 权限，因为 eBPF 程序需要加载到内核空间。各命令的详细使用说明请使用 `--help` 参数查看。

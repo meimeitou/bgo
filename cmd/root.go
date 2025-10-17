@@ -19,6 +19,7 @@ func init() {
 		MakeBioSnoop(),
 		MakeFirewallServer(),
 		MakeFirewallUpdate(),
+		MakeFirewallRateLimit(),
 		firewallLvsCmd,
 	)
 }
