@@ -21,5 +21,6 @@ func init() {
 		MakeFirewallUpdate(),
 		MakeFirewallRateLimit(),
 		firewallLvsCmd,
+		MakeFilterDNS(),
 	)
 }
