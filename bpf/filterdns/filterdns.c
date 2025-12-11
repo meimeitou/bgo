@@ -103,7 +103,7 @@ int xdp_filter_dns(struct xdp_md *ctx) {
     }
     
     // 检查是否是DNS流量（端口53）
-    if (src_port == DNS_PORT) {
+    if (src_port == DNS_PORT || dst_port == DNS_PORT) {
         update_stats(1);
         return XDP_PASS;
     }
