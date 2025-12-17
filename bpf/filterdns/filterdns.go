@@ -3,22 +3,35 @@
 package filterdns
 
 import (
+	"bufio"
+	"encoding/binary"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type dns_stats filterdns filterdns.c -- -I../../lib
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type dns_stats -type filter_config -type ipv6_addr filterdns filterdns.c -- -I../../lib -I/usr/include/x86_64-linux-gnu
+
+const (
+	ListModeDisabled  = 0 // 不启用黑白名单
+	ListModeWhitelist = 1 // 白名单模式
+	ListModeBlacklist = 2 // 黑名单模式
+)
 
 // Stats 统计信息
 type Stats struct {
-	TotalPackets   uint64 `json:"total_packets"`
-	DNSPackets     uint64 `json:"dns_packets"`
-	DroppedPackets uint64 `json:"dropped_packets"`
+	TotalPackets     uint64 `json:"total_packets"`
+	DNSPackets       uint64 `json:"dns_packets"`
+	DroppedPackets   uint64 `json:"dropped_packets"`
+	WhitelistAllowed uint64 `json:"whitelist_allowed"`
+	WhitelistDropped uint64 `json:"whitelist_dropped"`
+	BlacklistDropped uint64 `json:"blacklist_dropped"`
 }
 
 // FilterDNS DNS过滤器
@@ -29,7 +42,7 @@ type FilterDNS struct {
 }
 
 // New 创建新的DNS过滤器
-func New(interfaceName string) (*FilterDNS, error) {
+func New(interfaceName string, whitelistFile string, blacklistFile string) (*FilterDNS, error) {
 	// 移除内存限制
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("failed to remove memlock limit: %w", err)
@@ -39,6 +52,32 @@ func New(interfaceName string) (*FilterDNS, error) {
 	objs := &filterdnsObjects{}
 	if err := loadFilterdnsObjects(objs, nil); err != nil {
 		return nil, fmt.Errorf("failed to load BPF objects: %w", err)
+	}
+
+	// 设置黑白名单模式
+	listMode := ListModeDisabled
+	if whitelistFile != "" {
+		listMode = ListModeWhitelist
+		if err := loadIPList(objs, whitelistFile, true); err != nil {
+			objs.Close()
+			return nil, fmt.Errorf("failed to load whitelist: %w", err)
+		}
+		fmt.Printf("Whitelist loaded from %s\n", whitelistFile)
+	} else if blacklistFile != "" {
+		listMode = ListModeBlacklist
+		if err := loadIPList(objs, blacklistFile, false); err != nil {
+			objs.Close()
+			return nil, fmt.Errorf("failed to load blacklist: %w", err)
+		}
+		fmt.Printf("Blacklist loaded from %s\n", blacklistFile)
+	}
+
+	// 更新配置
+	configKey := uint32(0)
+	config := filterdnsFilterConfig{ListMode: uint32(listMode)}
+	if err := objs.ConfigMap.Put(configKey, config); err != nil {
+		objs.Close()
+		return nil, fmt.Errorf("failed to update config: %w", err)
 	}
 
 	// 获取网卡索引
@@ -60,13 +99,101 @@ func New(interfaceName string) (*FilterDNS, error) {
 	}
 
 	fmt.Printf("XDP filter-dns attached to interface %s\n", interfaceName)
-	fmt.Println("Only DNS traffic (port 53) will pass, all other traffic will be dropped")
+	if listMode == ListModeWhitelist {
+		fmt.Println("Whitelist mode: Only DNS traffic from whitelisted IPs will pass")
+	} else if listMode == ListModeBlacklist {
+		fmt.Println("Blacklist mode: DNS traffic from blacklisted IPs will be dropped")
+	} else {
+		fmt.Println("Only DNS traffic (port 53) will pass, all other traffic will be dropped")
+	}
 
 	return &FilterDNS{
 		objs:    objs,
 		xdpLink: xdpLink,
 		iface:   interfaceName,
 	}, nil
+}
+
+// loadIPList 从文件加载IP列表到BPF map
+func loadIPList(objs *filterdnsObjects, filename string, isWhitelist bool) error {
+	file, err := os.Open(filename)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	ipv4Count := 0
+	ipv6Count := 0
+	skipped := 0
+	dummy := uint8(1)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// 支持CSV格式，取第一列
+		fields := strings.FieldsFunc(line, func(r rune) bool {
+			return r == ',' || r == ';' || r == '\t'
+		})
+		if len(fields) == 0 {
+			continue
+		}
+		ipStr := strings.TrimSpace(fields[0])
+
+		// 解析IP地址
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			skipped++
+			continue
+		}
+
+		// 处理IPv4
+		if ipv4 := ip.To4(); ipv4 != nil {
+			ipInt := binary.BigEndian.Uint32(ipv4)
+			if isWhitelist {
+				if err := objs.Ipv4Whitelist.Put(ipInt, dummy); err != nil {
+					return fmt.Errorf("failed to add IPv4 %s to whitelist: %w", ipStr, err)
+				}
+			} else {
+				if err := objs.Ipv4Blacklist.Put(ipInt, dummy); err != nil {
+					return fmt.Errorf("failed to add IPv4 %s to blacklist: %w", ipStr, err)
+				}
+			}
+			ipv4Count++
+		} else if ipv6 := ip.To16(); ipv6 != nil {
+			// 处理IPv6
+			addr := filterdnsIpv6Addr{
+				Hi: binary.BigEndian.Uint64(ipv6[0:8]),
+				Lo: binary.BigEndian.Uint64(ipv6[8:16]),
+			}
+			if isWhitelist {
+				if err := objs.Ipv6Whitelist.Put(addr, dummy); err != nil {
+					return fmt.Errorf("failed to add IPv6 %s to whitelist: %w", ipStr, err)
+				}
+			} else {
+				if err := objs.Ipv6Blacklist.Put(addr, dummy); err != nil {
+					return fmt.Errorf("failed to add IPv6 %s to blacklist: %w", ipStr, err)
+				}
+			}
+			ipv6Count++
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading file: %w", err)
+	}
+
+	listType := "whitelist"
+	if !isWhitelist {
+		listType = "blacklist"
+	}
+	fmt.Printf("Loaded %d IPv4 and %d IPv6 addresses into %s (skipped %d invalid entries)\n",
+		ipv4Count, ipv6Count, listType, skipped)
+
+	return nil
 }
 
 // GetStats 获取统计信息
@@ -79,9 +206,12 @@ func (f *FilterDNS) GetStats() (*Stats, error) {
 	}
 
 	return &Stats{
-		TotalPackets:   stats.TotalPackets,
-		DNSPackets:     stats.DnsPackets,
-		DroppedPackets: stats.DroppedPackets,
+		TotalPackets:     stats.TotalPackets,
+		DNSPackets:       stats.DnsPackets,
+		DroppedPackets:   stats.DroppedPackets,
+		WhitelistAllowed: stats.WhitelistAllowed,
+		WhitelistDropped: stats.WhitelistDropped,
+		BlacklistDropped: stats.BlacklistDropped,
 	}, nil
 }
 

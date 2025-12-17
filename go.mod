@@ -1,6 +1,6 @@
 module github.com/meimeitou/bgo
 
-go 1.24.4
+go 1.24
 
 require (
 	github.com/cilium/ebpf v0.19.0

@@ -16,8 +16,8 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type fw_rule -type fw_stats firewall firewall.c -- -I../../lib
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type tc_rule -type firewall_tc_stats firewall_tc firewall_tc.c -- -I../../lib
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type fw_rule -type fw_stats firewall firewall.c -- -I../../lib -I/usr/include/x86_64-linux-gnu
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type tc_rule -type firewall_tc_stats firewall_tc firewall_tc.c -- -I../../lib -I/usr/include/x86_64-linux-gnu
 
 const (
 	// MaxRules defines the maximum number of rules we can handle (using #pragma unroll)

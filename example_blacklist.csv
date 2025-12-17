@@ -1,0 +1,14 @@
+# DNS Filter Blacklist Example (CSV format)
+# IP Address, Comment
+192.168.100.1, Blocked host 1
+192.168.100.2, Blocked host 2
+172.16.0.50, Suspicious IP
+10.10.10.10, Malicious server
+
+# IPv6
+2001:db8::1, Test blocked IPv6
+fe80::bad:cafe, Another blocked IPv6
+
+# Mixed with comments
+# 1.2.3.4, This line is commented out
+5.6.7.8, Active block

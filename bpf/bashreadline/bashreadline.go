@@ -22,7 +22,7 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -tags linux -target amd64 bpf uretprobe.c -- -I../../lib/common -I../../lib/libbpf
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -tags linux -target amd64 bpf uretprobe.c -- -I../../lib/common -I../../lib/libbpf -I/usr/include/x86_64-linux-gnu
 
 const (
 	// The path to the ELF binary containing the function to trace.

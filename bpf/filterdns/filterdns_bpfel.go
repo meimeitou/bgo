@@ -14,10 +14,24 @@ import (
 )
 
 type filterdnsDnsStats struct {
-	_              structs.HostLayout
-	TotalPackets   uint64
-	DnsPackets     uint64
-	DroppedPackets uint64
+	_                structs.HostLayout
+	TotalPackets     uint64
+	DnsPackets       uint64
+	DroppedPackets   uint64
+	WhitelistAllowed uint64
+	WhitelistDropped uint64
+	BlacklistDropped uint64
+}
+
+type filterdnsFilterConfig struct {
+	_        structs.HostLayout
+	ListMode uint32
+}
+
+type filterdnsIpv6Addr struct {
+	_  structs.HostLayout
+	Hi uint64
+	Lo uint64
 }
 
 // loadFilterdns returns the embedded CollectionSpec for filterdns.
@@ -69,7 +83,12 @@ type filterdnsProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type filterdnsMapSpecs struct {
-	StatsMap *ebpf.MapSpec `ebpf:"stats_map"`
+	ConfigMap     *ebpf.MapSpec `ebpf:"config_map"`
+	Ipv4Blacklist *ebpf.MapSpec `ebpf:"ipv4_blacklist"`
+	Ipv4Whitelist *ebpf.MapSpec `ebpf:"ipv4_whitelist"`
+	Ipv6Blacklist *ebpf.MapSpec `ebpf:"ipv6_blacklist"`
+	Ipv6Whitelist *ebpf.MapSpec `ebpf:"ipv6_whitelist"`
+	StatsMap      *ebpf.MapSpec `ebpf:"stats_map"`
 }
 
 // filterdnsVariableSpecs contains global variables before they are loaded into the kernel.
@@ -98,11 +117,21 @@ func (o *filterdnsObjects) Close() error {
 //
 // It can be passed to loadFilterdnsObjects or ebpf.CollectionSpec.LoadAndAssign.
 type filterdnsMaps struct {
-	StatsMap *ebpf.Map `ebpf:"stats_map"`
+	ConfigMap     *ebpf.Map `ebpf:"config_map"`
+	Ipv4Blacklist *ebpf.Map `ebpf:"ipv4_blacklist"`
+	Ipv4Whitelist *ebpf.Map `ebpf:"ipv4_whitelist"`
+	Ipv6Blacklist *ebpf.Map `ebpf:"ipv6_blacklist"`
+	Ipv6Whitelist *ebpf.Map `ebpf:"ipv6_whitelist"`
+	StatsMap      *ebpf.Map `ebpf:"stats_map"`
 }
 
 func (m *filterdnsMaps) Close() error {
 	return _FilterdnsClose(
+		m.ConfigMap,
+		m.Ipv4Blacklist,
+		m.Ipv4Whitelist,
+		m.Ipv6Blacklist,
+		m.Ipv6Whitelist,
 		m.StatsMap,
 	)
 }

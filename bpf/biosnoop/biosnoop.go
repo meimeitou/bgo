@@ -17,7 +17,7 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go biosnoop biosnoop.c -- -I../../lib
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go biosnoop biosnoop.c -- -I../../lib -I/usr/include/x86_64-linux-gnu
 
 // BioEvent represents a single block I/O event
 type BioEvent struct {

@@ -1,0 +1,16 @@
+# DNS Filter Whitelist Example
+# IPv4 addresses
+192.168.1.1
+192.168.1.100
+10.0.0.1
+8.8.8.8
+8.8.4.4
+
+# IPv6 addresses
+2001:4860:4860::8888
+2001:4860:4860::8844
+fe80::1
+
+# Invalid entries (will be skipped)
+invalid.ip.address
+999.999.999.999

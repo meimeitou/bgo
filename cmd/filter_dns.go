@@ -15,6 +15,8 @@ func MakeFilterDNS() *cobra.Command {
 		interfaceName string
 		showStats     bool
 		statsInterval int
+		whitelistFile string
+		blacklistFile string
 	)
 
 	command := &cobra.Command{
@@ -25,12 +27,28 @@ All other TCP/UDP traffic will be dropped.
 
 This is useful for testing or creating a minimal DNS-only network filter.
 
+Supports IP whitelist and blacklist for both IPv4 and IPv6 addresses.
+Whitelist mode: only allows DNS traffic from IPs in the whitelist.
+Blacklist mode: blocks DNS traffic from IPs in the blacklist.
+
+IP list file format:
+  - Plain text or CSV format
+  - One IP address per line
+  - Lines starting with # are treated as comments
+  - Invalid IP addresses are skipped
+
 Example:
   # Start DNS filter on eth0
   sudo bgo filter-dns --interface eth0
 
+  # Start with whitelist
+  sudo bgo filter-dns --interface eth0 --whitelist /path/to/whitelist.txt
+
+  # Start with blacklist
+  sudo bgo filter-dns --interface eth0 --blacklist /path/to/blacklist.txt
+
   # Start with stats display
-  sudo bgo filter-dns --interface eth0 --stats
+  sudo bgo filter-dns --interface eth0 --stats --whitelist allowed_ips.csv
 
   # Custom stats interval (every 5 seconds)
   sudo bgo filter-dns --interface eth0 --stats --interval 5`,
@@ -39,8 +57,13 @@ Example:
 				return fmt.Errorf("interface name is required")
 			}
 
+			// 检查不能同时指定黑名单和白名单
+			if whitelistFile != "" && blacklistFile != "" {
+				return fmt.Errorf("cannot specify both whitelist and blacklist")
+			}
+
 			// 创建DNS过滤器
-			filter, err := filterdns.New(interfaceName)
+			filter, err := filterdns.New(interfaceName, whitelistFile, blacklistFile)
 			if err != nil {
 				return fmt.Errorf("failed to create DNS filter: %w", err)
 			}
@@ -58,10 +81,17 @@ Example:
 							continue
 						}
 						fmt.Printf("\n=== DNS Filter Stats ===\n")
-						fmt.Printf("Total packets:   %d\n", stats.TotalPackets)
-						fmt.Printf("DNS packets:     %d (passed)\n", stats.DNSPackets)
-						fmt.Printf("Dropped packets: %d\n", stats.DroppedPackets)
-						fmt.Println("========================")
+						fmt.Printf("Total packets:      %d\n", stats.TotalPackets)
+						fmt.Printf("DNS packets:        %d (passed)\n", stats.DNSPackets)
+						fmt.Printf("Dropped packets:    %d\n", stats.DroppedPackets)
+						if whitelistFile != "" {
+							fmt.Printf("Whitelist allowed:  %d\n", stats.WhitelistAllowed)
+							fmt.Printf("Whitelist dropped:  %d\n", stats.WhitelistDropped)
+						}
+						if blacklistFile != "" {
+							fmt.Printf("Blacklist dropped:  %d\n", stats.BlacklistDropped)
+						}
+						fmt.Println("=========================")
 					}
 				}()
 			}
@@ -74,6 +104,8 @@ Example:
 	command.Flags().StringVarP(&interfaceName, "interface", "i", "", "Network interface to attach XDP filter (required)")
 	command.Flags().BoolVarP(&showStats, "stats", "s", false, "Show statistics periodically")
 	command.Flags().IntVarP(&statsInterval, "interval", "n", 2, "Statistics display interval in seconds")
+	command.Flags().StringVar(&whitelistFile, "whitelist", "", "Path to whitelist file (text or CSV, one IP per line)")
+	command.Flags().StringVar(&blacklistFile, "blacklist", "", "Path to blacklist file (text or CSV, one IP per line)")
 	command.MarkFlagRequired("interface")
 
 	return command
