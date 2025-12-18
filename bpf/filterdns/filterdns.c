@@ -57,9 +57,9 @@ struct {
     __uint(max_entries, 1);
 } stats_map SEC(".maps");
 
-// 配置Map
+// 配置Map - 使用 Per-CPU Array 避免跨 CPU 缓存同步开销
 struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __type(key, __u32);
     __type(value, struct filter_config);
     __uint(max_entries, 1);
