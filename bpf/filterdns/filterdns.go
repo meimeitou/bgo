@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -72,10 +73,18 @@ func New(interfaceName string, whitelistFile string, blacklistFile string) (*Fil
 		fmt.Printf("Blacklist loaded from %s\n", blacklistFile)
 	}
 
-	// 更新配置
+	// 更新配置 - Per-CPU map 需要为每个 CPU 提供相同的配置
 	configKey := uint32(0)
 	config := filterdnsFilterConfig{ListMode: uint32(listMode)}
-	if err := objs.ConfigMap.Put(configKey, config); err != nil {
+
+	// 获取 CPU 数量
+	numCPUs := runtime.NumCPU()
+	configSlice := make([]filterdnsFilterConfig, numCPUs)
+	for i := 0; i < numCPUs; i++ {
+		configSlice[i] = config
+	}
+
+	if err := objs.ConfigMap.Put(configKey, configSlice); err != nil {
 		objs.Close()
 		return nil, fmt.Errorf("failed to update config: %w", err)
 	}
