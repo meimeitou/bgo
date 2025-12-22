@@ -15,7 +15,6 @@ var RootCmd = &cobra.Command{
 func init() {
 	RootCmd.AddCommand(
 		MakeVersion(),
-		MakeBashReadline(),
 		MakeBioSnoop(),
 		MakeFirewallServer(),
 		MakeFirewallUpdate(),

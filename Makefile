@@ -21,13 +21,16 @@ BPF_DIR := bpf
 .PHONY: all
 all: deps-all clean generate build
 
-# 构建二进制文件
+# 构建二进制文件 (同时构建 amd64 和 arm64 版本)
 .PHONY: build
 build: generate
-	@echo "Building $(BINARY_NAME)..."
+	@echo "Building $(BINARY_NAME) for amd64 and arm64..."
 	@mkdir -p $(BUILD_DIR)
-	$(GO) build $(GOFLAGS) -tags $(TAGS) -o $(BUILD_DIR)/$(BINARY_NAME) .
-	@echo "Build complete: $(BUILD_DIR)/$(BINARY_NAME)"
+	GOOS=linux GOARCH=amd64 $(GO) build $(GOFLAGS) -tags $(TAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 .
+	GOOS=linux GOARCH=arm64 $(GO) build $(GOFLAGS) -tags $(TAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 .
+	@echo "Build complete:"
+	@echo "  - $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64"
+	@echo "  - $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64"
 
 # 生成 eBPF 代码
 .PHONY: generate
@@ -72,27 +75,33 @@ submodule-status:
 deps-all: submodule-init deps
 	@echo "All dependencies installed!"
 
-# 创建发布包
+# 创建发布包 (包含 amd64 和 arm64 版本)
 .PHONY: dist
 dist: clean build
-	@echo "Creating distribution package..."
+	@echo "Creating distribution packages..."
 	@mkdir -p $(DIST_DIR)
-	@tar -czf $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)-linux-amd64.tar.gz -C $(BUILD_DIR) $(BINARY_NAME)
-	@echo "Distribution package created: $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)-linux-amd64.tar.gz"
+	@tar -czf $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)-linux-amd64.tar.gz -C $(BUILD_DIR) $(BINARY_NAME)-linux-amd64
+	@tar -czf $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)-linux-arm64.tar.gz -C $(BUILD_DIR) $(BINARY_NAME)-linux-arm64
+	@echo "Distribution packages created:"
+	@echo "  - $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)-linux-amd64.tar.gz"
+	@echo "  - $(DIST_DIR)/$(BINARY_NAME)-$(VERSION)-linux-arm64.tar.gz"
 
-# 交叉编译
+# 交叉编译 (已整合到 build 目标中，保留此目标作为别名)
 .PHONY: cross-compile
-cross-compile: generate
-	@echo "Cross compiling..."
-	@mkdir -p $(BUILD_DIR)
-	GOOS=linux GOARCH=amd64 $(GO) build $(GOFLAGS) -tags $(TAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 .
-	GOOS=linux GOARCH=arm64 $(GO) build $(GOFLAGS) -tags $(TAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 .
+cross-compile: build
 
-# 安装到系统
+# 安装到系统 (根据当前系统架构选择对应版本)
 .PHONY: install
 install: build
 	@echo "Installing $(BINARY_NAME)..."
-	sudo cp $(BUILD_DIR)/$(BINARY_NAME) /usr/local/bin/
+	@if [ "$$(uname -m)" = "x86_64" ]; then \
+		sudo cp $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 /usr/local/bin/$(BINARY_NAME); \
+	elif [ "$$(uname -m)" = "aarch64" ]; then \
+		sudo cp $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 /usr/local/bin/$(BINARY_NAME); \
+	else \
+		echo "Unsupported architecture: $$(uname -m)"; \
+		exit 1; \
+	fi
 	@echo "Installed to /usr/local/bin/$(BINARY_NAME)"
 
 # 卸载
