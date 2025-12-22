@@ -8,3 +8,4 @@ bin
 *.elf
 *.s
 *.ll
+dist
