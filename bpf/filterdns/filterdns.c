@@ -23,6 +23,10 @@
 // DNS端口
 #define DNS_PORT 53
 
+// VLAN 以太网类型
+#define ETH_P_8021Q  0x8100  // 802.1Q VLAN
+#define ETH_P_8021AD 0x88A8  // 802.1ad QinQ
+
 // IP列表模式
 #define LIST_MODE_DISABLED  0  // 不启用黑白名单
 #define LIST_MODE_WHITELIST 1  // 白名单模式：只允许列表中的IP
@@ -154,6 +158,13 @@ int xdp_filter_dns(struct xdp_md *ctx) {
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end) {
         return XDP_PASS;
+    }
+    
+    // 过滤 VLAN 包 - 直接丢弃
+    __u16 eth_proto = bpf_ntohs(eth->h_proto);
+    if (eth_proto == ETH_P_8021Q || eth_proto == ETH_P_8021AD) {
+        update_stats(0, 0);
+        return XDP_DROP;
     }
     
     // 获取配置
