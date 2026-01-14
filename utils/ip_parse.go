@@ -9,14 +9,15 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-// 将IPv4地址转换为网络字节序的uint32
+// 将IPv4地址转换为uint32（匹配内核ip->saddr的表示）
 func ipv4ToUint32(ip net.IP) uint32 {
 	ip = ip.To4()
 	if ip == nil {
 		return 0
 	}
-	// 网络字节序（大端）
-	return binary.BigEndian.Uint32(ip)
+	// 使用 NativeEndian 以匹配内核中 ip->saddr 的表示
+	// 在小端机器上，ip->saddr 存储的网络字节序数据会被解释为小端值
+	return binary.NativeEndian.Uint32(ip)
 }
 
 // 存储到eBPF map
