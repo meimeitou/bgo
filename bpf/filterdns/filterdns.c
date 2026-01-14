@@ -191,13 +191,14 @@ int xdp_filter_dns(struct xdp_md *ctx) {
             return XDP_PASS;
         }
         
-        // 保存源IP地址
-        ipv4_addr = ip->saddr;
+        // 保存源IP和目的IP地址
+        __u32 src_ipv4 = ip->saddr;
+        __u32 dst_ipv4 = ip->daddr;
         
         // 黑白名单检查（优先级最高）- 检查所有流量（包括ICMP）
         if (list_mode == LIST_MODE_WHITELIST) {
-            // 白名单模式：只允许白名单中的IP的所有流量
-            if (!check_ipv4_whitelist(ipv4_addr)) {
+            // 白名单模式：源IP或目的IP任一在白名单中即允许通过
+            if (!check_ipv4_whitelist(src_ipv4) && !check_ipv4_whitelist(dst_ipv4)) {
                 update_stats(0, 2); // whitelist_dropped
                 return XDP_DROP;
             }
@@ -205,8 +206,8 @@ int xdp_filter_dns(struct xdp_md *ctx) {
             update_stats(1, 1); // whitelist_allowed
             return XDP_PASS;
         } else if (list_mode == LIST_MODE_BLACKLIST) {
-            // 黑名单模式：阻止黑名单中IP的所有流量（包括ICMP等）
-            if (check_ipv4_blacklist(ipv4_addr)) {
+            // 黑名单模式：源IP或目的IP任一在黑名单中即阻止
+            if (check_ipv4_blacklist(src_ipv4) || check_ipv4_blacklist(dst_ipv4)) {
                 update_stats(0, 3); // blacklist_dropped
                 return XDP_DROP;
             }
@@ -260,20 +261,25 @@ int xdp_filter_dns(struct xdp_md *ctx) {
             return XDP_PASS;
         }
         
-        // 保存源IPv6地址
+        // 保存源IPv6和目的IPv6地址
+        struct ipv6_addr src_ipv6 = {0};
+        struct ipv6_addr dst_ipv6 = {0};
+        
         #pragma unroll
         for (int i = 0; i < 8; i++) {
             if (i < 4) {
-                ipv6_addr.hi = (ipv6_addr.hi << 16) | __builtin_bswap16(ip6->saddr.in6_u.u6_addr16[i]);
+                src_ipv6.hi = (src_ipv6.hi << 16) | __builtin_bswap16(ip6->saddr.in6_u.u6_addr16[i]);
+                dst_ipv6.hi = (dst_ipv6.hi << 16) | __builtin_bswap16(ip6->daddr.in6_u.u6_addr16[i]);
             } else {
-                ipv6_addr.lo = (ipv6_addr.lo << 16) | __builtin_bswap16(ip6->saddr.in6_u.u6_addr16[i]);
+                src_ipv6.lo = (src_ipv6.lo << 16) | __builtin_bswap16(ip6->saddr.in6_u.u6_addr16[i]);
+                dst_ipv6.lo = (dst_ipv6.lo << 16) | __builtin_bswap16(ip6->daddr.in6_u.u6_addr16[i]);
             }
         }
         
         // 黑白名单检查（优先级最高）- 检查所有流量（包括ICMPv6）
         if (list_mode == LIST_MODE_WHITELIST) {
-            // 白名单模式：只允许白名单中的IP的所有流量
-            if (!check_ipv6_whitelist(&ipv6_addr)) {
+            // 白名单模式：源IP或目的IP任一在白名单中即允许通过
+            if (!check_ipv6_whitelist(&src_ipv6) && !check_ipv6_whitelist(&dst_ipv6)) {
                 update_stats(0, 2); // whitelist_dropped
                 return XDP_DROP;
             }
@@ -281,8 +287,8 @@ int xdp_filter_dns(struct xdp_md *ctx) {
             update_stats(1, 1); // whitelist_allowed
             return XDP_PASS;
         } else if (list_mode == LIST_MODE_BLACKLIST) {
-            // 黑名单模式：阻止黑名单中IP的所有流量（包括ICMPv6等）
-            if (check_ipv6_blacklist(&ipv6_addr)) {
+            // 黑名单模式：源IP或目的IP任一在黑名单中即阻止
+            if (check_ipv6_blacklist(&src_ipv6) || check_ipv6_blacklist(&dst_ipv6)) {
                 update_stats(0, 3); // blacklist_dropped
                 return XDP_DROP;
             }
