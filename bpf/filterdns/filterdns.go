@@ -160,8 +160,10 @@ func loadIPList(objs *filterdnsObjects, filename string, isWhitelist bool) error
 		}
 
 		// 处理IPv4
+		// 注意：ip->saddr 在内核中是网络字节序存储，在小端机器上读取为 __u32 时
+		// 需要使用 NativeEndian（小端机器上是 LittleEndian）来匹配
 		if ipv4 := ip.To4(); ipv4 != nil {
-			ipInt := binary.BigEndian.Uint32(ipv4)
+			ipInt := binary.NativeEndian.Uint32(ipv4)
 			if isWhitelist {
 				if err := objs.Ipv4Whitelist.Put(ipInt, dummy); err != nil {
 					return fmt.Errorf("failed to add IPv4 %s to whitelist: %w", ipStr, err)

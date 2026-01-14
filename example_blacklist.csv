@@ -12,3 +12,4 @@ fe80::bad:cafe, Another blocked IPv6
 # Mixed with comments
 # 1.2.3.4, This line is commented out
 5.6.7.8, Active block
+192.168.63.20,test

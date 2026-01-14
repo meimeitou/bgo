@@ -160,13 +160,14 @@ int xdp_filter_dns(struct xdp_md *ctx) {
         return XDP_PASS;
     }
     
-    // 过滤 VLAN 包 - 直接丢弃
     __u16 eth_proto = bpf_ntohs(eth->h_proto);
+
+    // 过滤 VLAN 包 - 直接丢弃
     if (eth_proto == ETH_P_8021Q || eth_proto == ETH_P_8021AD) {
         update_stats(0, 0);
         return XDP_DROP;
     }
-    
+
     // 获取配置
     __u32 config_key = 0;
     struct filter_config *config = bpf_map_lookup_elem(&config_map, &config_key);
@@ -178,7 +179,7 @@ int xdp_filter_dns(struct xdp_md *ctx) {
     struct ipv6_addr ipv6_addr = {0};
     
     // 处理IPv4
-    if (eth->h_proto == bpf_htons(ETH_P_IP)) {
+    if (eth_proto == ETH_P_IP) {
         is_ipv4 = 1;
         struct iphdr *ip = (void *)(eth + 1);
         if ((void *)(ip + 1) > data_end) {
@@ -193,6 +194,28 @@ int xdp_filter_dns(struct xdp_md *ctx) {
         // 保存源IP地址
         ipv4_addr = ip->saddr;
         
+        // 黑白名单检查（优先级最高）- 检查所有流量（包括ICMP）
+        if (list_mode == LIST_MODE_WHITELIST) {
+            // 白名单模式：只允许白名单中的IP的所有流量
+            if (!check_ipv4_whitelist(ipv4_addr)) {
+                update_stats(0, 2); // whitelist_dropped
+                return XDP_DROP;
+            }
+            // 在白名单中，允许所有流量通过
+            update_stats(1, 1); // whitelist_allowed
+            return XDP_PASS;
+        } else if (list_mode == LIST_MODE_BLACKLIST) {
+            // 黑名单模式：阻止黑名单中IP的所有流量（包括ICMP等）
+            if (check_ipv4_blacklist(ipv4_addr)) {
+                update_stats(0, 3); // blacklist_dropped
+                return XDP_DROP;
+            }
+            // 不在黑名单中，允许所有流量通过
+            update_stats(1, 0);
+            return XDP_PASS;
+        }
+        
+        // 以下是无黑白名单模式：只允许DNS流量
         __u16 src_port = 0;
         __u16 dst_port = 0;
         
@@ -212,41 +235,17 @@ int xdp_filter_dns(struct xdp_md *ctx) {
             src_port = bpf_ntohs(tcp->source);
             dst_port = bpf_ntohs(tcp->dest);
         } else {
-            // 非TCP/UDP协议 不处理
+            // 非TCP/UDP协议（如ICMP），无黑白名单模式下丢弃
             update_stats(0, 0);
-            return XDP_PASS;
+            return XDP_DROP;
         }
         
         // 检查是否是DNS流量（端口53）
         int is_dns = (src_port == DNS_PORT || dst_port == DNS_PORT);
         
-        // 黑白名单检查
-        if (list_mode == LIST_MODE_WHITELIST) {
-            // 白名单模式：只允许白名单中的IP
-            if (!check_ipv4_whitelist(ipv4_addr)) {
-                update_stats(0, 2); // whitelist_dropped
-                return XDP_DROP;
-            }
-            if (is_dns) {
-                update_stats(1, 1); // dns + whitelist_allowed
-                return XDP_PASS;
-            }
-        } else if (list_mode == LIST_MODE_BLACKLIST) {
-            // 黑名单模式：拒绝黑名单中的IP
-            if (check_ipv4_blacklist(ipv4_addr)) {
-                update_stats(0, 3); // blacklist_dropped
-                return XDP_DROP;
-            }
-            if (is_dns) {
-                update_stats(1, 0);
-                return XDP_PASS;
-            }
-        } else {
-            // 无黑白名单模式
-            if (is_dns) {
-                update_stats(1, 0);
-                return XDP_PASS;
-            }
+        if (is_dns) {
+            update_stats(1, 0);
+            return XDP_PASS;
         }
         
         // 非DNS流量丢弃
@@ -254,7 +253,7 @@ int xdp_filter_dns(struct xdp_md *ctx) {
         return XDP_DROP;
     }
     // 处理IPv6
-    else if (eth->h_proto == bpf_htons(ETH_P_IPV6)) {
+    else if (eth_proto == ETH_P_IPV6) {
         is_ipv6 = 1;
         struct ipv6hdr *ip6 = (void *)(eth + 1);
         if ((void *)(ip6 + 1) > data_end) {
@@ -271,6 +270,28 @@ int xdp_filter_dns(struct xdp_md *ctx) {
             }
         }
         
+        // 黑白名单检查（优先级最高）- 检查所有流量（包括ICMPv6）
+        if (list_mode == LIST_MODE_WHITELIST) {
+            // 白名单模式：只允许白名单中的IP的所有流量
+            if (!check_ipv6_whitelist(&ipv6_addr)) {
+                update_stats(0, 2); // whitelist_dropped
+                return XDP_DROP;
+            }
+            // 在白名单中，允许所有流量通过
+            update_stats(1, 1); // whitelist_allowed
+            return XDP_PASS;
+        } else if (list_mode == LIST_MODE_BLACKLIST) {
+            // 黑名单模式：阻止黑名单中IP的所有流量（包括ICMPv6等）
+            if (check_ipv6_blacklist(&ipv6_addr)) {
+                update_stats(0, 3); // blacklist_dropped
+                return XDP_DROP;
+            }
+            // 不在黑名单中，允许所有流量通过
+            update_stats(1, 0);
+            return XDP_PASS;
+        }
+        
+        // 以下是无黑白名单模式：只允许DNS流量
         __u16 src_port = 0;
         __u16 dst_port = 0;
         __u8 next_hdr = ip6->nexthdr;
@@ -291,41 +312,17 @@ int xdp_filter_dns(struct xdp_md *ctx) {
             src_port = bpf_ntohs(tcp->source);
             dst_port = bpf_ntohs(tcp->dest);
         } else {
-            // 非TCP/UDP协议 不处理
+            // 非TCP/UDP协议（如ICMPv6），无黑白名单模式下丢弃
             update_stats(0, 0);
-            return XDP_PASS;
+            return XDP_DROP;
         }
         
         // 检查是否是DNS流量（端口53）
         int is_dns = (src_port == DNS_PORT || dst_port == DNS_PORT);
         
-        // 黑白名单检查
-        if (list_mode == LIST_MODE_WHITELIST) {
-            // 白名单模式：只允许白名单中的IP
-            if (!check_ipv6_whitelist(&ipv6_addr)) {
-                update_stats(0, 2); // whitelist_dropped
-                return XDP_DROP;
-            }
-            if (is_dns) {
-                update_stats(1, 1); // dns + whitelist_allowed
-                return XDP_PASS;
-            }
-        } else if (list_mode == LIST_MODE_BLACKLIST) {
-            // 黑名单模式：拒绝黑名单中的IP
-            if (check_ipv6_blacklist(&ipv6_addr)) {
-                update_stats(0, 3); // blacklist_dropped
-                return XDP_DROP;
-            }
-            if (is_dns) {
-                update_stats(1, 0);
-                return XDP_PASS;
-            }
-        } else {
-            // 无黑白名单模式
-            if (is_dns) {
-                update_stats(1, 0);
-                return XDP_PASS;
-            }
+        if (is_dns) {
+            update_stats(1, 0);
+            return XDP_PASS;
         }
         
         // 非DNS流量丢弃
